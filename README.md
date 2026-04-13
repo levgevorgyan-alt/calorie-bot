@@ -1,8 +1,9 @@
 # Calorie Bot
 
-A Telegram bot that estimates calories from meal descriptions, tracks daily
-intake per user, enforces configurable calorie limits, logs water intake,
-and sends scheduled water reminders.
+A Telegram bot that estimates calories and macronutrients (protein, fat, carbs)
+from meal descriptions or photos using AI. Features personalized daily targets
+based on user measurements, daily/weekly tracking, water intake logging, and
+scheduled water reminders.
 
 ## Prerequisites
 
@@ -45,24 +46,34 @@ Send any meal description to the bot (DM or group chat), or send a photo of your
 You can also send a **photo** of your meal. Add a caption for better accuracy
 (e.g. "about 200g of pasta with sauce").
 
-The bot replies with a calorie breakdown and daily progress:
+The bot replies with calories, macros, per-100g values, and daily progress:
 
 ```
 🍽 Calorie Estimate:
-- 2 scrambled eggs: ~180 kcal
-- Toast with butter: ~120 kcal
-- Black coffee: ~2 kcal
+- Scrambled eggs (2 large, 100g): ~182 kcal
+  P: 12g | F: 14g | C: 2g
+  per 100g: 143 raw / 182 cooked
+- Toast with butter (50g): ~178 kcal
+  P: 4g | F: 9g | C: 21g
+  per 100g: 265 raw / 265 cooked
 
-Total: ~302 kcal
-📊 Today so far: 302 / 1800 kcal (1498 remaining)
+Total: ~360 kcal | P: 16g | F: 23g | C: 23g
+📊 Today: 360 / 2100 kcal (1740 remaining)
+   P: 16/150g | F: 23/65g | C: 23/250g
 ```
 
 ## Commands
 
+### Profile
+- `/profile <height_cm> <weight_kg> <age> <gender> <activity>` - Set measurements for personalized targets
+  Activity levels: `sedentary`, `light`, `moderate`, `active`, `very_active`
+- `/myprofile` - Show your profile and daily targets
+- `/macros` - Show today's macro progress (P/F/C)
+
 ### Calories
 - `/today` - Show today's meals and calorie total
 - `/week` - 7-day calorie summary
-- `/setlimit <kcal>` - Set your daily calorie limit (default: 1800)
+- `/setlimit <kcal>` - Override daily calorie limit (macros scale proportionally)
 - `/limit` - Show your current limit
 
 ### Water
@@ -85,9 +96,14 @@ Daily target: 2000ml
 ### Reset
 - `/reset meals` - Clear today's meal logs
 - `/reset water` - Clear today's water logs
-- `/reset all` - Delete all your data (meals, water, limit resets to default)
+- `/reset all` - Delete all your data (meals, water, profile, limits)
 
 ### Examples
+
+**Set up your profile:**
+```
+/profile 180 75 28 male moderate
+```
 
 **Log a meal** (just type it):
 ```
@@ -99,7 +115,7 @@ big mac, medium fries, diet coke
 **Log a meal by photo:**
 Send a photo of your meal. Optionally add a caption like "about 200g of pasta" for better accuracy.
 
-**Set a calorie limit:**
+**Override calorie limit (macros scale):**
 ```
 /setlimit 2200
 ```
@@ -113,6 +129,7 @@ Send a photo of your meal. Optionally add a caption like "about 200g of pasta" f
 ```
 /today
 /watertoday
+/macros
 ```
 
 **Weekly summary:**
@@ -136,3 +153,5 @@ Send a photo of your meal. Optionally add a caption like "about 200g of pasta" f
 - Render free tier spins down after 15 min of inactivity. First message after idle has a ~30s cold start.
 - In group chats, turn off Group Privacy via BotFather so the bot sees all messages.
 - Data is stored in SQLite. On Render free tier, data resets on redeploy.
+- Set your profile first with `/profile` for personalized calorie and macro recommendations.
+- Activity levels: sedentary (no exercise), light (1-3 days/week), moderate (3-5 days/week), active (6-7 days/week), very_active (hard daily exercise or physical job).
