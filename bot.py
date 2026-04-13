@@ -98,6 +98,36 @@ ACTIVITY_LEVELS = {
     "very_active": "hard exercise daily or physical job",
 }
 
+GOALS = {
+    "lose_weight": "calorie deficit for fat loss",
+    "maintain": "maintain current weight",
+    "gain_muscle": "calorie surplus for muscle gain",
+}
+
+MEALPLAN_PROMPT = (
+    "You are a professional dietitian. Create a complete 7-day meal plan "
+    "based on the user's profile, goals, and preferences below. "
+    "Return ONLY valid JSON with no extra text.\n\n"
+    "Rules:\n"
+    "- Each day must hit the daily calorie and macro targets closely.\n"
+    "- Respect the excluded foods strictly - never include them.\n"
+    "- Vary meals across the week - do not repeat the same meal on consecutive days.\n"
+    "- Use commonly available ingredients.\n"
+    "- Keep the total weekly shopping cost within the specified budget.\n"
+    "- Consolidate the shopping list: combine quantities, no duplicate items.\n"
+    "- Estimate realistic local prices in the specified currency.\n"
+    "- For lose_weight goal: prioritize high-protein, high-fiber, lower-calorie meals.\n"
+    "- For gain_muscle goal: prioritize high-protein, calorie-dense meals.\n\n"
+    "JSON format:\n"
+    '{"days": [{"day": "Monday", "meals": [{"slot": "<meal name>", "time": "<HH:MM>", '
+    '"name": "<dish name>", "ingredients": ["<item qty>", ...], '
+    '"calories": <int>, "protein_g": <int>, "fat_g": <int>, "carbs_g": <int>}], '
+    '"day_total": {"calories": <int>, "protein_g": <int>, "fat_g": <int>, '
+    '"carbs_g": <int>}}], '
+    '"shopping_list": [{"item": "<name>", "quantity": "<amount>", '
+    '"estimated_cost": <float>}], "total_cost": <float>, "currency": "<code>"}'
+)
+
 # Water reminder schedule: (hour, minute, amount_ml) in UTC
 WATER_SCHEDULE = [
     (11, 0, 500),
@@ -162,6 +192,21 @@ def db_init() -> None:
         );
         CREATE TABLE IF NOT EXISTS reminder_chats (
             chat_id INTEGER PRIMARY KEY
+        );
+        CREATE TABLE IF NOT EXISTS diet_prefs (
+            user_id INTEGER PRIMARY KEY,
+            goal TEXT NOT NULL DEFAULT 'maintain',
+            schedule TEXT NOT NULL DEFAULT '[]',
+            excludes TEXT NOT NULL DEFAULT '[]',
+            budget_amount REAL NOT NULL DEFAULT 0,
+            budget_currency TEXT NOT NULL DEFAULT 'EUR'
+        );
+        CREATE TABLE IF NOT EXISTS meal_plans (
+            user_id INTEGER PRIMARY KEY,
+            week_start TEXT NOT NULL,
+            plan_json TEXT NOT NULL,
+            shoplist_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
         );
     """)
     # Migrate older meals table that may lack macro columns
@@ -394,8 +439,85 @@ def reset_all_data(user_id: int) -> None:
     conn.execute("DELETE FROM water WHERE user_id = ?", (user_id,))
     conn.execute("DELETE FROM limits WHERE user_id = ?", (user_id,))
     conn.execute("DELETE FROM profiles WHERE user_id = ?", (user_id,))
+    conn.execute("DELETE FROM diet_prefs WHERE user_id = ?", (user_id,))
+    conn.execute("DELETE FROM meal_plans WHERE user_id = ?", (user_id,))
     conn.commit()
     conn.close()
+
+
+def save_diet_prefs(user_id: int, goal: str, schedule: list,
+                    excludes: list, budget_amount: float,
+                    budget_currency: str) -> None:
+    conn = db_connect()
+    conn.execute(
+        "INSERT INTO diet_prefs (user_id, goal, schedule, excludes,"
+        " budget_amount, budget_currency) VALUES (?, ?, ?, ?, ?, ?)"
+        " ON CONFLICT(user_id) DO UPDATE SET goal = excluded.goal,"
+        " schedule = excluded.schedule, excludes = excluded.excludes,"
+        " budget_amount = excluded.budget_amount,"
+        " budget_currency = excluded.budget_currency",
+        (user_id, goal, json.dumps(schedule), json.dumps(excludes),
+         budget_amount, budget_currency),
+    )
+    conn.commit()
+    conn.close()
+
+
+def update_diet_pref(user_id: int, **kwargs) -> None:
+    """Update specific diet preference fields."""
+    conn = db_connect()
+    # Ensure row exists
+    conn.execute(
+        "INSERT OR IGNORE INTO diet_prefs (user_id, goal, schedule, excludes,"
+        " budget_amount, budget_currency) VALUES (?, 'maintain', '[]', '[]', 0, 'EUR')",
+        (user_id,),
+    )
+    for key, value in kwargs.items():
+        if key in ("schedule", "excludes"):
+            value = json.dumps(value)
+        conn.execute(f"UPDATE diet_prefs SET {key} = ? WHERE user_id = ?",
+                     (value, user_id))
+    conn.commit()
+    conn.close()
+
+
+def get_diet_prefs(user_id: int) -> dict | None:
+    conn = db_connect()
+    row = conn.execute(
+        "SELECT * FROM diet_prefs WHERE user_id = ?", (user_id,)
+    ).fetchone()
+    conn.close()
+    if not row:
+        return None
+    d = dict(row)
+    d["schedule"] = json.loads(d["schedule"])
+    d["excludes"] = json.loads(d["excludes"])
+    return d
+
+
+def save_meal_plan(user_id: int, week_start: str,
+                   plan_json: str, shoplist_json: str) -> None:
+    conn = db_connect()
+    conn.execute(
+        "INSERT INTO meal_plans (user_id, week_start, plan_json, shoplist_json,"
+        " created_at) VALUES (?, ?, ?, ?, ?)"
+        " ON CONFLICT(user_id) DO UPDATE SET week_start = excluded.week_start,"
+        " plan_json = excluded.plan_json, shoplist_json = excluded.shoplist_json,"
+        " created_at = excluded.created_at",
+        (user_id, week_start, plan_json, shoplist_json,
+         datetime.now(timezone.utc).isoformat()),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_meal_plan(user_id: int) -> dict | None:
+    conn = db_connect()
+    row = conn.execute(
+        "SELECT * FROM meal_plans WHERE user_id = ?", (user_id,)
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
 
 
 # ---------------------------------------------------------------------------
@@ -472,6 +594,39 @@ def scale_macros(base_calories: int, new_calories: int,
         return (protein_g, fat_g, carbs_g)
     ratio = new_calories / base_calories
     return (round(protein_g * ratio), round(fat_g * ratio), round(carbs_g * ratio))
+
+
+def generate_meal_plan(targets: dict, profile: dict, prefs: dict) -> dict:
+    """Generate a 7-day meal plan via AI based on user profile and preferences."""
+    schedule_str = ", ".join(
+        f"{s['meal']} at {s['time']}" for s in prefs["schedule"]
+    )
+    excludes_str = ", ".join(prefs["excludes"]) if prefs["excludes"] else "none"
+    goal_desc = GOALS.get(prefs["goal"], prefs["goal"])
+
+    user_msg = (
+        f"Daily targets: {targets['daily_limit']} kcal, "
+        f"P: {targets['daily_protein_g']}g, F: {targets['daily_fat_g']}g, "
+        f"C: {targets['daily_carbs_g']}g\n"
+        f"Goal: {prefs['goal']} ({goal_desc})\n"
+        f"Meal schedule: {schedule_str}\n"
+        f"Excluded foods: {excludes_str}\n"
+        f"Weekly budget: {prefs['budget_amount']} {prefs['budget_currency']}\n"
+        f"Person: {profile['height_cm']}cm, {profile['weight_kg']}kg, "
+        f"age {profile['age']}, {profile['gender']}, "
+        f"activity: {profile.get('activity', 'moderate')}"
+    )
+
+    response = groq_client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        temperature=0.5,
+        max_tokens=8000,
+        messages=[
+            {"role": "system", "content": MEALPLAN_PROMPT},
+            {"role": "user", "content": user_msg},
+        ],
+    )
+    return _parse_ai_json(response.choices[0].message.content)
 
 
 def format_reply(data: dict, today: dict, targets: dict) -> str:
@@ -572,10 +727,23 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/watertoday - show today's water intake\n"
         "/reminders on|off - toggle water reminders\n"
         "  Schedule: 11:00, 14:00, 16:00, 18:00, 20:00 UTC\n\n"
+        "\U0001f957 DIET PLANNING\n\n"
+        "/goal <lose_weight|maintain|gain_muscle>\n"
+        "  example: /goal lose_weight\n\n"
+        "/schedule <meal time>, <meal time>, ...\n"
+        "  example: /schedule breakfast 8:00, lunch 13:00, dinner 19:00\n\n"
+        "/exclude <food1>, <food2>, ...\n"
+        "  example: /exclude pork, shellfish, peanuts\n"
+        "  /exclude clear - remove all exclusions\n\n"
+        "/budget <amount> <currency>\n"
+        "  example: /budget 80 EUR\n\n"
+        "/mealplan - generate 7-day meal plan with shopping list\n"
+        "/shoplist - re-show last shopping list\n"
+        "/diet - show your current diet preferences\n\n"
         "\U0001f504 RESET DATA\n\n"
         "/reset meals - clear today's meals\n"
         "/reset water - clear today's water\n"
-        "/reset all - delete ALL your data (meals, water, profile, limits)\n"
+        "/reset all - delete ALL your data\n"
         "  Only affects your own data."
     )
 
@@ -897,7 +1065,7 @@ async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             "Usage:\n"
             "/reset meals - clear today's meal logs\n"
             "/reset water - clear today's water logs\n"
-            "/reset all - delete all your data (meals, water, profile, limits)"
+            "/reset all - delete all your data (meals, water, profile, diet, limits)"
         )
         return
 
@@ -913,12 +1081,309 @@ async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     elif action == "all":
         reset_all_data(user_id)
         await update.message.reply_text(
-            "\u2705 All your data has been deleted (meals, water, profile, limits)."
+            "\u2705 All your data has been deleted (meals, water, profile, diet, limits)."
         )
     else:
         await update.message.reply_text(
             "Unknown option. Use: /reset meals, /reset water, or /reset all"
         )
+
+
+async def goal_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not context.args:
+        goals_list = "\n".join(f"  {k} - {v}" for k, v in GOALS.items())
+        await update.message.reply_text(
+            f"Usage: /goal <goal>\n\nGoals:\n{goals_list}\n\n"
+            "Example: /goal lose_weight"
+        )
+        return
+
+    goal = context.args[0].lower()
+    if goal not in GOALS:
+        goals_list = "\n".join(f"  {k} - {v}" for k, v in GOALS.items())
+        await update.message.reply_text(
+            f"Invalid goal. Choose one:\n{goals_list}"
+        )
+        return
+
+    update_diet_pref(update.effective_user.id, goal=goal)
+    await update.message.reply_text(
+        f"\u2705 Goal set to: {goal} ({GOALS[goal]})"
+    )
+
+
+async def schedule_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not context.args:
+        await update.message.reply_text(
+            "Usage: /schedule <meal time>, <meal time>, ...\n\n"
+            "Example:\n"
+            "/schedule breakfast 8:00, lunch 13:00, snack 16:00, dinner 19:00"
+        )
+        return
+
+    raw = " ".join(context.args)
+    slots = []
+    for part in raw.split(","):
+        tokens = part.strip().split()
+        if len(tokens) < 2:
+            await update.message.reply_text(
+                f"Invalid slot: '{part.strip()}'. Each slot needs a name and time.\n"
+                "Example: breakfast 8:00, lunch 13:00, dinner 19:00"
+            )
+            return
+        meal_name = tokens[0].lower()
+        meal_time = tokens[1]
+        # Basic time validation
+        try:
+            h, m = meal_time.split(":")
+            int(h); int(m)
+        except (ValueError, AttributeError):
+            await update.message.reply_text(
+                f"Invalid time format: '{meal_time}'. Use HH:MM (e.g. 13:00)"
+            )
+            return
+        slots.append({"meal": meal_name, "time": meal_time})
+
+    if len(slots) < 2 or len(slots) > 7:
+        await update.message.reply_text("Please specify between 2 and 7 meals.")
+        return
+
+    update_diet_pref(update.effective_user.id, schedule=slots)
+    schedule_str = "\n".join(f"  {s['meal']} at {s['time']}" for s in slots)
+    await update.message.reply_text(
+        f"\u2705 Eating schedule set:\n{schedule_str}"
+    )
+
+
+async def exclude_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not context.args:
+        await update.message.reply_text(
+            "Usage: /exclude <food1>, <food2>, ...\n"
+            "Example: /exclude pork, shellfish, peanuts\n\n"
+            "To clear exclusions: /exclude clear"
+        )
+        return
+
+    raw = " ".join(context.args)
+    if raw.strip().lower() == "clear":
+        update_diet_pref(update.effective_user.id, excludes=[])
+        await update.message.reply_text("\u2705 Exclusion list cleared.")
+        return
+
+    excludes = [item.strip() for item in raw.split(",") if item.strip()]
+    update_diet_pref(update.effective_user.id, excludes=excludes)
+    await update.message.reply_text(
+        f"\u2705 Excluded foods: {', '.join(excludes)}"
+    )
+
+
+async def budget_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not context.args or len(context.args) < 2:
+        await update.message.reply_text(
+            "Usage: /budget <amount> <currency>\n"
+            "Example: /budget 80 EUR\n"
+            "Example: /budget 5000 RUB"
+        )
+        return
+
+    try:
+        amount = float(context.args[0])
+    except ValueError:
+        await update.message.reply_text("Amount must be a number. Example: /budget 80 EUR")
+        return
+    if amount <= 0:
+        await update.message.reply_text("Amount must be positive.")
+        return
+
+    currency = context.args[1].upper()
+    update_diet_pref(update.effective_user.id,
+                     budget_amount=amount, budget_currency=currency)
+    await update.message.reply_text(
+        f"\u2705 Weekly budget set to {amount} {currency}"
+    )
+
+
+async def diet_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show current diet preferences at a glance."""
+    prefs = get_diet_prefs(update.effective_user.id)
+    if not prefs:
+        await update.message.reply_text(
+            "No diet preferences set yet. Use these commands:\n"
+            "/goal <lose_weight|maintain|gain_muscle>\n"
+            "/schedule breakfast 8:00, lunch 13:00, dinner 19:00\n"
+            "/exclude pork, shellfish\n"
+            "/budget 80 EUR"
+        )
+        return
+
+    goal_desc = GOALS.get(prefs["goal"], prefs["goal"])
+    schedule_str = ", ".join(
+        f"{s['meal']} {s['time']}" for s in prefs["schedule"]
+    ) if prefs["schedule"] else "not set"
+    excludes_str = ", ".join(prefs["excludes"]) if prefs["excludes"] else "none"
+    budget_str = (
+        f"{prefs['budget_amount']} {prefs['budget_currency']}"
+        if prefs["budget_amount"] > 0 else "not set"
+    )
+
+    await update.message.reply_text(
+        f"\U0001f957 Diet Preferences:\n\n"
+        f"Goal: {prefs['goal']} ({goal_desc})\n"
+        f"Schedule: {schedule_str}\n"
+        f"Excluded: {excludes_str}\n"
+        f"Weekly budget: {budget_str}"
+    )
+
+
+async def mealplan_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Generate a 7-day meal plan."""
+    user_id = update.effective_user.id
+
+    # Check prerequisites
+    profile = get_profile(user_id)
+    if not profile:
+        await update.message.reply_text(
+            "Please set your profile first:\n"
+            "/profile <height_cm> <weight_kg> <age> <gender> <activity>"
+        )
+        return
+
+    prefs = get_diet_prefs(user_id)
+    missing = []
+    if not prefs or prefs["goal"] == "maintain" and not prefs["schedule"]:
+        missing.append("/goal <lose_weight|maintain|gain_muscle>")
+    if not prefs or not prefs["schedule"]:
+        missing.append("/schedule breakfast 8:00, lunch 13:00, dinner 19:00")
+    if not prefs or prefs["budget_amount"] <= 0:
+        missing.append("/budget <amount> <currency>")
+
+    if missing:
+        await update.message.reply_text(
+            "Please set these preferences first:\n" + "\n".join(missing)
+        )
+        return
+
+    targets = get_targets(user_id)
+    if targets["daily_protein_g"] == 0:
+        await update.message.reply_text(
+            "Your macro targets are not set. Run /profile to get personalized recommendations."
+        )
+        return
+
+    await update.message.reply_text(
+        "\u2699\ufe0f Generating your 7-day meal plan... This may take a moment."
+    )
+
+    try:
+        plan = generate_meal_plan(targets, profile, prefs)
+
+        # Save the plan
+        today = datetime.now(timezone.utc)
+        # Find next Monday (or today if Monday)
+        days_until_monday = (7 - today.weekday()) % 7
+        if days_until_monday == 0 and today.hour >= 12:
+            days_until_monday = 7
+        week_start = (today + timedelta(days=days_until_monday)).strftime("%Y-%m-%d")
+
+        shoplist = plan.get("shopping_list", [])
+        save_meal_plan(
+            user_id, week_start,
+            json.dumps(plan), json.dumps(shoplist),
+        )
+
+        # Send day-by-day messages
+        for day_data in plan.get("days", []):
+            lines = [f"\U0001f4c5 {day_data['day']}"]
+            for meal in day_data.get("meals", []):
+                slot = meal.get("slot", "")
+                t = meal.get("time", "")
+                lines.append(
+                    f"\n\U0001f37d {slot.capitalize()} ({t})\n"
+                    f"{meal.get('name', '')}\n"
+                    f"~{meal.get('calories', 0)} kcal | "
+                    f"P: {meal.get('protein_g', 0)}g | "
+                    f"F: {meal.get('fat_g', 0)}g | "
+                    f"C: {meal.get('carbs_g', 0)}g"
+                )
+            dt = day_data.get("day_total", {})
+            lines.append(
+                f"\nDay total: {dt.get('calories', 0)} kcal | "
+                f"P: {dt.get('protein_g', 0)}g | "
+                f"F: {dt.get('fat_g', 0)}g | "
+                f"C: {dt.get('carbs_g', 0)}g"
+            )
+            await update.message.reply_text("\n".join(lines))
+
+        # Send shopping list
+        currency = plan.get("currency", prefs["budget_currency"])
+        total_cost = plan.get("total_cost", 0)
+        budget = prefs["budget_amount"]
+        diff = budget - total_cost
+
+        shop_lines = [
+            f"\U0001f6d2 Weekly Shopping List "
+            f"(Budget: {budget} {currency})\n"
+        ]
+        for item in shoplist:
+            shop_lines.append(
+                f"- {item.get('item', '')} {item.get('quantity', '')}: "
+                f"~{item.get('estimated_cost', 0)} {currency}"
+            )
+        shop_lines.append(f"\nEstimated total: ~{total_cost} {currency}")
+        if diff >= 0:
+            shop_lines.append(f"({diff:.0f} {currency} under budget)")
+        else:
+            shop_lines.append(f"\u26a0\ufe0f ({abs(diff):.0f} {currency} over budget)")
+
+        await update.message.reply_text("\n".join(shop_lines))
+
+    except json.JSONDecodeError:
+        logger.exception("Failed to parse meal plan JSON")
+        await update.message.reply_text(
+            "Sorry, I couldn't generate a valid meal plan. Please try again."
+        )
+    except Exception:
+        logger.exception("Error generating meal plan")
+        await update.message.reply_text(
+            "Something went wrong generating the meal plan. Please try again."
+        )
+
+
+async def shoplist_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Re-show the shopping list from the last generated plan."""
+    plan_row = get_meal_plan(update.effective_user.id)
+    if not plan_row:
+        await update.message.reply_text(
+            "No meal plan generated yet. Use /mealplan to create one."
+        )
+        return
+
+    prefs = get_diet_prefs(update.effective_user.id)
+    shoplist = json.loads(plan_row["shoplist_json"])
+    plan = json.loads(plan_row["plan_json"])
+
+    currency = plan.get("currency", prefs["budget_currency"] if prefs else "EUR")
+    total_cost = plan.get("total_cost", 0)
+    budget = prefs["budget_amount"] if prefs else 0
+
+    shop_lines = [
+        f"\U0001f6d2 Weekly Shopping List"
+        f" (Week of {plan_row['week_start']})\n"
+    ]
+    for item in shoplist:
+        shop_lines.append(
+            f"- {item.get('item', '')} {item.get('quantity', '')}: "
+            f"~{item.get('estimated_cost', 0)} {currency}"
+        )
+    shop_lines.append(f"\nEstimated total: ~{total_cost} {currency}")
+    if budget > 0:
+        diff = budget - total_cost
+        if diff >= 0:
+            shop_lines.append(f"({diff:.0f} {currency} under budget)")
+        else:
+            shop_lines.append(f"\u26a0\ufe0f ({abs(diff):.0f} {currency} over budget)")
+
+    await update.message.reply_text("\n".join(shop_lines))
 
 
 # ---------------------------------------------------------------------------
@@ -1036,6 +1501,15 @@ def main() -> None:
 
     # Reset command
     app.add_handler(CommandHandler("reset", reset_command))
+
+    # Diet planning commands
+    app.add_handler(CommandHandler("goal", goal_command))
+    app.add_handler(CommandHandler("schedule", schedule_command))
+    app.add_handler(CommandHandler("exclude", exclude_command))
+    app.add_handler(CommandHandler("budget", budget_command))
+    app.add_handler(CommandHandler("mealplan", mealplan_command))
+    app.add_handler(CommandHandler("shoplist", shoplist_command))
+    app.add_handler(CommandHandler("diet", diet_command))
 
     # Meal & photo handlers (must be last)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_meal))

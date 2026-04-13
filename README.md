@@ -96,9 +96,31 @@ Daily target: 2000ml
 ### Reset
 - `/reset meals` - Clear today's meal logs
 - `/reset water` - Clear today's water logs
-- `/reset all` - Delete all your data (meals, water, profile, limits)
+- `/reset all` - Delete all your data (meals, water, profile, diet, limits)
+
+### Diet Planning
+- `/goal <lose_weight|maintain|gain_muscle>` - Set your fitness goal
+- `/schedule <meal time>, ...` - Set eating schedule (e.g. `/schedule breakfast 8:00, lunch 13:00, dinner 19:00`)
+- `/exclude <foods>` - Set foods to avoid (e.g. `/exclude pork, shellfish`). Use `/exclude clear` to reset.
+- `/budget <amount> <currency>` - Set weekly food budget (e.g. `/budget 80 EUR`)
+- `/mealplan` - Generate a 7-day meal plan with shopping list
+- `/shoplist` - Re-show last shopping list
+- `/diet` - Show current diet preferences
 
 ### Examples
+
+**Set diet preferences:**
+```
+/goal lose_weight
+/schedule breakfast 8:00, lunch 13:00, snack 16:00, dinner 19:00
+/exclude pork, shellfish, peanuts
+/budget 80 EUR
+```
+
+**Generate a weekly meal plan:**
+```
+/mealplan
+```
 
 **Set up your profile:**
 ```
