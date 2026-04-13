@@ -1,11 +1,13 @@
 # Calorie Bot
 
-A Telegram bot that estimates calories from meal descriptions using OpenAI.
+A Telegram bot that estimates calories from meal descriptions, tracks daily
+intake per user, enforces configurable calorie limits, logs water intake,
+and sends scheduled water reminders.
 
 ## Prerequisites
 
 1. Create a Telegram bot via [@BotFather](https://t.me/BotFather) and save the token.
-2. Get an OpenAI API key from [platform.openai.com](https://platform.openai.com).
+2. Get a free Groq API key from [console.groq.com](https://console.groq.com).
 
 ## Local Development
 
@@ -13,7 +15,7 @@ A Telegram bot that estimates calories from meal descriptions using OpenAI.
 pip install -r requirements.txt
 
 export TELEGRAM_BOT_TOKEN="your-token"
-export OPENAI_API_KEY="your-key"
+export GROQ_API_KEY="your-key"
 
 # Run in polling mode (no webhook needed locally)
 python bot.py --poll
@@ -28,11 +30,9 @@ python bot.py --poll
 5. Set **Start Command** to `python bot.py`.
 6. Add environment variables under **Environment**:
    - `TELEGRAM_BOT_TOKEN` - your bot token from BotFather
-   - `OPENAI_API_KEY` - your OpenAI key
+   - `GROQ_API_KEY` - your Groq API key
    - `WEBHOOK_URL` - the URL Render assigns (e.g. `https://calorie-bot.onrender.com`)
 7. Click **Deploy**.
-
-The bot will automatically register its webhook with Telegram on startup.
 
 ## Usage
 
@@ -42,23 +42,45 @@ Send any meal description to the bot (DM or group chat):
 2 scrambled eggs, toast with butter, black coffee
 ```
 
-The bot replies with a calorie breakdown:
+The bot replies with a calorie breakdown and daily progress:
 
 ```
-Calorie Estimate:
+🍽 Calorie Estimate:
 - 2 scrambled eggs: ~180 kcal
-- 1 slice toast with butter: ~120 kcal
+- Toast with butter: ~120 kcal
 - Black coffee: ~2 kcal
 
 Total: ~302 kcal
+📊 Today so far: 302 / 1800 kcal (1498 remaining)
 ```
 
 ## Commands
 
-- `/start` - Welcome message
-- `/help` - Usage instructions
+### Calories
+- `/today` - Show today's meals and calorie total
+- `/week` - 7-day calorie summary
+- `/setlimit <kcal>` - Set your daily calorie limit (default: 1800)
+- `/limit` - Show your current limit
+
+### Water
+- `/water <ml>` - Log water intake (e.g. `/water 500`)
+- `/watertoday` - Show today's water intake
+- `/reminders on` - Enable water reminders in this chat
+- `/reminders off` - Disable water reminders
+
+### Water Reminder Schedule (UTC)
+| Time  | Amount |
+|-------|--------|
+| 11:00 | 500ml  |
+| 14:00 | 500ml  |
+| 16:00 | 250ml  |
+| 18:00 | 500ml  |
+| 20:00 | 250ml  |
+
+Daily target: 2000ml
 
 ## Notes
 
 - Render free tier spins down after 15 min of inactivity. First message after idle has a ~30s cold start.
-- In group chats, configure BotFather's "Group Privacy" setting to control whether the bot sees all messages or only those mentioning it.
+- In group chats, turn off Group Privacy via BotFather so the bot sees all messages.
+- Data is stored in SQLite. On Render free tier, data resets on redeploy.
