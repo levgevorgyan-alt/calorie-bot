@@ -1,7 +1,9 @@
 import json
 import logging
 import os
+import sqlite3
 import sys
+from datetime import datetime, timedelta, time, timezone
 
 from groq import Groq
 from telegram import Update
@@ -24,6 +26,10 @@ GROQ_API_KEY = os.environ["GROQ_API_KEY"]
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")
 PORT = int(os.environ.get("PORT", "10000"))
 
+DB_PATH = os.environ.get("DB_PATH", "calories.db")
+DEFAULT_CALORIE_LIMIT = 1800
+DAILY_WATER_TARGET_ML = 2000
+
 groq_client = Groq(api_key=GROQ_API_KEY)
 
 SYSTEM_PROMPT = (
@@ -34,6 +40,179 @@ SYSTEM_PROMPT = (
     "estimate and note assumptions in a short 'note' field."
 )
 
+# Water reminder schedule: (hour, minute, amount_ml) in UTC
+WATER_SCHEDULE = [
+    (11, 0, 500),
+    (14, 0, 500),
+    (16, 0, 250),
+    (18, 0, 500),
+    (20, 0, 250),
+]
+
+
+# ---------------------------------------------------------------------------
+# Database helpers
+# ---------------------------------------------------------------------------
+
+def db_connect() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def db_init() -> None:
+    conn = db_connect()
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS meals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            username TEXT,
+            chat_id INTEGER,
+            meal_text TEXT,
+            calories INTEGER NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS limits (
+            user_id INTEGER PRIMARY KEY,
+            daily_limit INTEGER NOT NULL DEFAULT 1800
+        );
+        CREATE TABLE IF NOT EXISTS water (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            username TEXT,
+            chat_id INTEGER,
+            amount_ml INTEGER NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS reminder_chats (
+            chat_id INTEGER PRIMARY KEY
+        );
+    """)
+    conn.commit()
+    conn.close()
+
+
+def save_meal(user_id: int, username: str, chat_id: int,
+              meal_text: str, calories: int) -> None:
+    conn = db_connect()
+    conn.execute(
+        "INSERT INTO meals (user_id, username, chat_id, meal_text, calories, created_at)"
+        " VALUES (?, ?, ?, ?, ?, ?)",
+        (user_id, username, chat_id, meal_text, calories,
+         datetime.now(timezone.utc).isoformat()),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_today_meals(user_id: int) -> list[dict]:
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    conn = db_connect()
+    rows = conn.execute(
+        "SELECT meal_text, calories, created_at FROM meals"
+        " WHERE user_id = ? AND created_at LIKE ?",
+        (user_id, f"{today}%"),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_today_total(user_id: int) -> int:
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    conn = db_connect()
+    row = conn.execute(
+        "SELECT COALESCE(SUM(calories), 0) AS total FROM meals"
+        " WHERE user_id = ? AND created_at LIKE ?",
+        (user_id, f"{today}%"),
+    ).fetchone()
+    conn.close()
+    return row["total"]
+
+
+def get_week_summary(user_id: int) -> list[dict]:
+    """Return daily totals for the last 7 days."""
+    since = (datetime.now(timezone.utc) - timedelta(days=6)).strftime("%Y-%m-%d")
+    conn = db_connect()
+    rows = conn.execute(
+        "SELECT SUBSTR(created_at, 1, 10) AS day, SUM(calories) AS total"
+        " FROM meals WHERE user_id = ? AND created_at >= ?"
+        " GROUP BY day ORDER BY day",
+        (user_id, since),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_limit(user_id: int) -> int:
+    conn = db_connect()
+    row = conn.execute(
+        "SELECT daily_limit FROM limits WHERE user_id = ?", (user_id,)
+    ).fetchone()
+    conn.close()
+    return row["daily_limit"] if row else DEFAULT_CALORIE_LIMIT
+
+
+def set_limit(user_id: int, daily_limit: int) -> None:
+    conn = db_connect()
+    conn.execute(
+        "INSERT INTO limits (user_id, daily_limit) VALUES (?, ?)"
+        " ON CONFLICT(user_id) DO UPDATE SET daily_limit = excluded.daily_limit",
+        (user_id, daily_limit),
+    )
+    conn.commit()
+    conn.close()
+
+
+def save_water(user_id: int, username: str, chat_id: int, amount_ml: int) -> None:
+    conn = db_connect()
+    conn.execute(
+        "INSERT INTO water (user_id, username, chat_id, amount_ml, created_at)"
+        " VALUES (?, ?, ?, ?, ?)",
+        (user_id, username, chat_id, amount_ml,
+         datetime.now(timezone.utc).isoformat()),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_today_water(user_id: int) -> int:
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    conn = db_connect()
+    row = conn.execute(
+        "SELECT COALESCE(SUM(amount_ml), 0) AS total FROM water"
+        " WHERE user_id = ? AND created_at LIKE ?",
+        (user_id, f"{today}%"),
+    ).fetchone()
+    conn.close()
+    return row["total"]
+
+
+def add_reminder_chat(chat_id: int) -> None:
+    conn = db_connect()
+    conn.execute(
+        "INSERT OR IGNORE INTO reminder_chats (chat_id) VALUES (?)", (chat_id,)
+    )
+    conn.commit()
+    conn.close()
+
+
+def remove_reminder_chat(chat_id: int) -> None:
+    conn = db_connect()
+    conn.execute("DELETE FROM reminder_chats WHERE chat_id = ?", (chat_id,))
+    conn.commit()
+    conn.close()
+
+
+def get_reminder_chats() -> list[int]:
+    conn = db_connect()
+    rows = conn.execute("SELECT chat_id FROM reminder_chats").fetchall()
+    conn.close()
+    return [r["chat_id"] for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Calorie estimation
+# ---------------------------------------------------------------------------
 
 def estimate_calories(meal_text: str) -> dict:
     """Send meal description to Groq and return parsed JSON."""
@@ -46,40 +225,199 @@ def estimate_calories(meal_text: str) -> dict:
         ],
     )
     raw = response.choices[0].message.content.strip()
-    # Strip markdown code fences if present
     if raw.startswith("```"):
         raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
     return json.loads(raw)
 
 
-def format_reply(data: dict) -> str:
-    """Turn the JSON calorie data into a readable Telegram message."""
+def format_reply(data: dict, today_total: int, daily_limit: int) -> str:
+    """Format calorie estimate with daily progress."""
     lines = ["\U0001f37d Calorie Estimate:"]
     for item in data.get("items", []):
         lines.append(f"- {item['name']}: ~{item['calories']} kcal")
     lines.append(f"\nTotal: ~{data['total']} kcal")
     note = data.get("note")
     if note:
-        lines.append(f"\n({note})")
+        lines.append(f"({note})")
+
+    remaining = daily_limit - today_total
+    if remaining >= 0:
+        lines.append(
+            f"\n\U0001f4ca Today so far: {today_total} / {daily_limit} kcal"
+            f" ({remaining} remaining)"
+        )
+    else:
+        lines.append(
+            f"\n\u26a0\ufe0f Over limit! Today: {today_total} / {daily_limit} kcal"
+            f" (+{abs(remaining)} over)"
+        )
     return "\n".join(lines)
 
+
+# ---------------------------------------------------------------------------
+# Command handlers
+# ---------------------------------------------------------------------------
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "Hi! Send me a description of what you ate and I'll estimate the calories.\n\n"
-        "Example: '2 scrambled eggs, 1 toast with butter, black coffee'"
+        "Example: '2 scrambled eggs, 1 toast with butter, black coffee'\n\n"
+        "Type /help to see all commands."
     )
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        "Just type what you ate in plain text. I'll reply with a calorie estimate.\n\n"
-        "Examples:\n"
-        "- 'bowl of oatmeal with banana'\n"
-        "- 'big mac, medium fries, diet coke'\n"
-        "- 'chicken salad with olive oil dressing'"
+        "Just type what you ate in plain text.\n\n"
+        "Calorie commands:\n"
+        "/today - show today's meals and total\n"
+        "/week - 7-day calorie summary\n"
+        "/setlimit <kcal> - set daily calorie limit\n"
+        "/limit - show your current limit\n\n"
+        "Water commands:\n"
+        "/water <ml> - log water (e.g. /water 500)\n"
+        "/watertoday - show today's water intake\n"
+        "/reminders on - enable water reminders in this chat\n"
+        "/reminders off - disable water reminders"
     )
 
+
+async def today_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    meals = get_today_meals(user_id)
+    if not meals:
+        await update.message.reply_text("No meals logged today. Just type what you ate!")
+        return
+
+    daily_limit = get_limit(user_id)
+    total = sum(m["calories"] for m in meals)
+    remaining = daily_limit - total
+
+    lines = ["\U0001f4cb Today's meals:"]
+    for m in meals:
+        t = m["created_at"][11:16]
+        lines.append(f"- [{t}] {m['meal_text'][:40]}: ~{m['calories']} kcal")
+
+    lines.append(f"\nTotal: {total} kcal")
+    if remaining >= 0:
+        lines.append(f"\U0001f4ca {total} / {daily_limit} kcal ({remaining} remaining)")
+    else:
+        lines.append(
+            f"\u26a0\ufe0f Over limit! {total} / {daily_limit} kcal"
+            f" (+{abs(remaining)} over)"
+        )
+    await update.message.reply_text("\n".join(lines))
+
+
+async def week_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    summary = get_week_summary(user_id)
+    if not summary:
+        await update.message.reply_text("No data for the past 7 days.")
+        return
+
+    daily_limit = get_limit(user_id)
+    lines = ["\U0001f4c5 Weekly Summary:"]
+    for day in summary:
+        diff = day["total"] - daily_limit
+        status = f"+{diff} over" if diff > 0 else f"{abs(diff)} under"
+        lines.append(f"- {day['day']}: {day['total']} kcal ({status})")
+
+    week_total = sum(d["total"] for d in summary)
+    lines.append(f"\nWeek total: {week_total} kcal")
+    await update.message.reply_text("\n".join(lines))
+
+
+async def setlimit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not context.args:
+        await update.message.reply_text("Usage: /setlimit <kcal>\nExample: /setlimit 2200")
+        return
+    try:
+        value = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("Please provide a number. Example: /setlimit 2200")
+        return
+    if value < 500 or value > 10000:
+        await update.message.reply_text("Limit must be between 500 and 10000 kcal.")
+        return
+
+    set_limit(update.effective_user.id, value)
+    await update.message.reply_text(f"Daily calorie limit set to {value} kcal.")
+
+
+async def limit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    current = get_limit(update.effective_user.id)
+    await update.message.reply_text(f"Your daily calorie limit: {current} kcal")
+
+
+async def water_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not context.args:
+        await update.message.reply_text("Usage: /water <ml>\nExample: /water 500")
+        return
+    try:
+        amount = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("Please provide a number. Example: /water 500")
+        return
+    if amount <= 0 or amount > 5000:
+        await update.message.reply_text("Amount must be between 1 and 5000 ml.")
+        return
+
+    user = update.effective_user
+    save_water(user.id, user.username or user.first_name, update.effective_chat.id, amount)
+    total = get_today_water(user.id)
+    remaining = DAILY_WATER_TARGET_ML - total
+
+    if remaining > 0:
+        await update.message.reply_text(
+            f"\U0001f4a7 Logged {amount}ml.\n"
+            f"Today: {total} / {DAILY_WATER_TARGET_ML}ml ({remaining}ml remaining)"
+        )
+    else:
+        await update.message.reply_text(
+            f"\U0001f4a7 Logged {amount}ml.\n"
+            f"\u2705 Today: {total} / {DAILY_WATER_TARGET_ML}ml - target reached!"
+        )
+
+
+async def watertoday_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    total = get_today_water(update.effective_user.id)
+    remaining = DAILY_WATER_TARGET_ML - total
+    if remaining > 0:
+        await update.message.reply_text(
+            f"\U0001f4a7 Water today: {total} / {DAILY_WATER_TARGET_ML}ml"
+            f" ({remaining}ml remaining)"
+        )
+    else:
+        await update.message.reply_text(
+            f"\u2705 Water today: {total} / {DAILY_WATER_TARGET_ML}ml - target reached!"
+        )
+
+
+async def reminders_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not context.args:
+        await update.message.reply_text("Usage: /reminders on  or  /reminders off")
+        return
+    action = context.args[0].lower()
+    chat_id = update.effective_chat.id
+    if action == "on":
+        add_reminder_chat(chat_id)
+        schedule = "\n".join(
+            f"  {h:02d}:{m:02d} UTC - {a}ml" for h, m, a in WATER_SCHEDULE
+        )
+        await update.message.reply_text(
+            f"\U0001f4a7 Water reminders enabled for this chat!\n\nSchedule:\n{schedule}"
+        )
+    elif action == "off":
+        remove_reminder_chat(chat_id)
+        await update.message.reply_text("Water reminders disabled for this chat.")
+    else:
+        await update.message.reply_text("Usage: /reminders on  or  /reminders off")
+
+
+# ---------------------------------------------------------------------------
+# Meal message handler
+# ---------------------------------------------------------------------------
 
 async def handle_meal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle any text message as a meal description."""
@@ -87,11 +425,17 @@ async def handle_meal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if not meal_text:
         return
 
+    user = update.effective_user
     try:
         data = estimate_calories(meal_text)
-        reply = format_reply(data)
+        calories = data.get("total", 0)
+        save_meal(user.id, user.username or user.first_name,
+                  update.effective_chat.id, meal_text, calories)
+        today_total = get_today_total(user.id)
+        daily_limit = get_limit(user.id)
+        reply = format_reply(data, today_total, daily_limit)
     except json.JSONDecodeError:
-        logger.exception("Failed to parse OpenAI response")
+        logger.exception("Failed to parse Groq response")
         reply = "Sorry, I couldn't parse the calorie data. Try rephrasing your meal."
     except Exception:
         logger.exception("Error estimating calories")
@@ -100,14 +444,63 @@ async def handle_meal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await update.message.reply_text(reply)
 
 
+# ---------------------------------------------------------------------------
+# Water reminder job
+# ---------------------------------------------------------------------------
+
+async def send_water_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Scheduled job: send water reminder to all registered chats."""
+    amount = context.job.data
+    chat_ids = get_reminder_chats()
+    for chat_id in chat_ids:
+        try:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    f"\U0001f4a7 Water Reminder!\n"
+                    f"Time to drink ~{amount}ml of water.\n"
+                    f"Use /water {amount} to log it."
+                ),
+            )
+        except Exception:
+            logger.exception("Failed to send water reminder to chat %s", chat_id)
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
 def main() -> None:
     use_polling = "--poll" in sys.argv
 
+    db_init()
+
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
+    # Calorie commands
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("today", today_command))
+    app.add_handler(CommandHandler("week", week_command))
+    app.add_handler(CommandHandler("setlimit", setlimit_command))
+    app.add_handler(CommandHandler("limit", limit_command))
+
+    # Water commands
+    app.add_handler(CommandHandler("water", water_command))
+    app.add_handler(CommandHandler("watertoday", watertoday_command))
+    app.add_handler(CommandHandler("reminders", reminders_command))
+
+    # Meal handler (must be last so commands are matched first)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_meal))
+
+    # Schedule water reminders
+    for hour, minute, amount in WATER_SCHEDULE:
+        app.job_queue.run_daily(
+            send_water_reminder,
+            time=time(hour=hour, minute=minute, tzinfo=timezone.utc),
+            data=amount,
+            name=f"water_{hour:02d}{minute:02d}",
+        )
 
     if use_polling:
         logger.info("Starting bot in polling mode (local dev)")
