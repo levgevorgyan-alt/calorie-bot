@@ -65,7 +65,8 @@ Total: ~360 kcal | P: 16g | F: 23g | C: 23g
 ## Commands
 
 ### Profile
-- `/profile <height_cm> <weight_kg> <age> <gender>` - Set measurements for personalized targets
+- `/profile <height_cm> <weight_kg> <age> <gender> <activity>` - Set measurements for personalized targets
+  Activity levels: `sedentary`, `light`, `moderate`, `active`, `very_active`
 - `/myprofile` - Show your profile and daily targets
 - `/macros` - Show today's macro progress (P/F/C)
 
@@ -101,7 +102,7 @@ Daily target: 2000ml
 
 **Set up your profile:**
 ```
-/profile 180 75 28 male
+/profile 180 75 28 male moderate
 ```
 
 **Log a meal** (just type it):
@@ -153,3 +154,4 @@ Send a photo of your meal. Optionally add a caption like "about 200g of pasta" f
 - In group chats, turn off Group Privacy via BotFather so the bot sees all messages.
 - Data is stored in SQLite. On Render free tier, data resets on redeploy.
 - Set your profile first with `/profile` for personalized calorie and macro recommendations.
+- Activity levels: sedentary (no exercise), light (1-3 days/week), moderate (3-5 days/week), active (6-7 days/week), very_active (hard daily exercise or physical job).
