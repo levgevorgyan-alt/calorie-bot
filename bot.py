@@ -108,8 +108,11 @@ MEALPLAN_PROMPT = (
     "You are a professional dietitian. Create a complete 7-day meal plan "
     "based on the user's profile, goals, and preferences below. "
     "Return ONLY valid JSON with no extra text.\n\n"
-    "Rules:\n"
-    "- Each day must hit the daily calorie and macro targets closely.\n"
+    "CRITICAL RULES:\n"
+    "- Each day MUST hit the daily calorie target within 5% (e.g. if target is "
+    "2500 kcal, each day must be 2375-2625 kcal). This is the most important rule.\n"
+    "- Each day MUST hit the protein target within 10%.\n"
+    "- Distribute calories and macros across all meal slots in the schedule.\n"
     "- Respect the excluded foods strictly - never include them.\n"
     "- Vary meals across the week - do not repeat the same meal on consecutive days.\n"
     "- Use commonly available ingredients.\n"
@@ -117,7 +120,8 @@ MEALPLAN_PROMPT = (
     "- Consolidate the shopping list: combine quantities, no duplicate items.\n"
     "- Estimate realistic local prices in the specified currency.\n"
     "- For lose_weight goal: prioritize high-protein, high-fiber, lower-calorie meals.\n"
-    "- For gain_muscle goal: prioritize high-protein, calorie-dense meals.\n\n"
+    "- For gain_muscle goal: prioritize high-protein, calorie-dense meals.\n"
+    "- All 7 days (Monday through Sunday) MUST be included.\n\n"
     "JSON format:\n"
     '{"days": [{"day": "Monday", "meals": [{"slot": "<meal name>", "time": "<HH:MM>", '
     '"name": "<dish name>", "ingredients": ["<item qty>", ...], '
@@ -605,6 +609,8 @@ def generate_meal_plan(targets: dict, profile: dict, prefs: dict) -> dict:
     goal_desc = GOALS.get(prefs["goal"], prefs["goal"])
 
     user_msg = (
+        f"IMPORTANT: Each day MUST total {targets['daily_limit']} kcal "
+        f"(within 5%). Do NOT go below this.\n\n"
         f"Daily targets: {targets['daily_limit']} kcal, "
         f"P: {targets['daily_protein_g']}g, F: {targets['daily_fat_g']}g, "
         f"C: {targets['daily_carbs_g']}g\n"
@@ -620,7 +626,7 @@ def generate_meal_plan(targets: dict, profile: dict, prefs: dict) -> dict:
     response = groq_client.chat.completions.create(
         model="llama-3.3-70b-versatile",
         temperature=0.5,
-        max_tokens=8000,
+        max_tokens=16000,
         messages=[
             {"role": "system", "content": MEALPLAN_PROMPT},
             {"role": "user", "content": user_msg},
