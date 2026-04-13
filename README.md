@@ -36,11 +36,14 @@ python bot.py --poll
 
 ## Usage
 
-Send any meal description to the bot (DM or group chat):
+Send any meal description to the bot (DM or group chat), or send a photo of your meal:
 
 ```
 2 scrambled eggs, toast with butter, black coffee
 ```
+
+You can also send a **photo** of your meal. Add a caption for better accuracy
+(e.g. "about 200g of pasta with sauce").
 
 The bot replies with a calorie breakdown and daily progress:
 
@@ -92,6 +95,9 @@ chicken salad with rice
 2 eggs, toast with butter, black coffee
 big mac, medium fries, diet coke
 ```
+
+**Log a meal by photo:**
+Send a photo of your meal. Optionally add a caption like "about 200g of pasta" for better accuracy.
 
 **Set a calorie limit:**
 ```
