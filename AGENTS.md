@@ -31,13 +31,15 @@ structure. The file is organized into these sections:
 
 1. **Config & constants** - env vars, defaults, system/vision/profile prompts, water schedule
 2. **Database helpers** - `db_connect()`, `db_init()`, CRUD functions for meals,
-   water, limits, profiles, and reminder_chats tables. Includes migration logic
+   water, limits, profiles, diet_prefs, meal_plans, and reminder_chats tables. Includes migration logic
    for adding macro columns to older databases.
 3. **AI helpers** - `estimate_calories()`, `estimate_calories_from_photo()`,
-   `calculate_recommendations()`, `scale_macros()`, `_parse_ai_json()`, `format_reply()`
+   `calculate_recommendations()`, `generate_meal_plan()`, `scale_macros()`,
+   `_parse_ai_json()`, `format_reply()`
 4. **Command handlers** - async functions for `/start`, `/help`, `/profile`,
    `/myprofile`, `/macros`, `/today`, `/week`, `/setlimit`, `/limit`,
-   `/water`, `/watertoday`, `/reminders`, `/reset`
+   `/water`, `/watertoday`, `/reminders`, `/reset`, `/goal`, `/schedule`,
+   `/exclude`, `/budget`, `/mealplan`, `/shoplist`, `/diet`
 5. **Meal handler** - `handle_meal()` processes any non-command text message
 6. **Photo handler** - `handle_photo()` downloads the photo, sends to vision model
 7. **Water reminder job** - `send_water_reminder()` runs on a daily schedule
