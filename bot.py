@@ -3,6 +3,7 @@ import logging
 import os
 import sqlite3
 import sys
+import base64
 from datetime import datetime, timedelta, time, timezone
 
 from groq import Groq
@@ -44,6 +45,19 @@ SYSTEM_PROMPT = (
     "(e.g. for bread, drinks), use the same number for both. "
     "If a description is unclear, make your best estimate and note assumptions "
     "in a short 'note' field."
+)
+
+VISION_PROMPT = (
+    "You are a nutrition assistant. Look at this photo of a meal and identify "
+    "each food item visible. Estimate calories for each item and provide a total. "
+    "Return ONLY valid JSON with no extra text: "
+    '{"items": [{"name": "<food>", "portion": "<estimated weight or description>", '
+    '"calories": <int>, "per_100g_raw": <int>, "per_100g_cooked": <int>}], '
+    '"total": <int>}. '
+    "Estimate portion sizes from visual cues (plate size, utensils, etc). "
+    "Always include per_100g_raw and per_100g_cooked for each item. "
+    "If you cannot identify a food clearly, make your best guess and add a "
+    "'note' field explaining your assumptions."
 )
 
 # Water reminder schedule: (hour, minute, amount_ml) in UTC
@@ -267,6 +281,33 @@ def estimate_calories(meal_text: str) -> dict:
     return json.loads(raw)
 
 
+def estimate_calories_from_photo(image_bytes: bytes, caption: str = "") -> dict:
+    """Send a meal photo to Groq vision model and return parsed JSON."""
+    b64_image = base64.b64encode(image_bytes).decode("utf-8")
+    user_content = [
+        {
+            "type": "image_url",
+            "image_url": {"url": f"data:image/jpeg;base64,{b64_image}"},
+        },
+        {
+            "type": "text",
+            "text": caption if caption else "What food is in this photo? Estimate calories.",
+        },
+    ]
+    response = groq_client.chat.completions.create(
+        model="llama-3.2-90b-vision-preview",
+        temperature=0.3,
+        messages=[
+            {"role": "system", "content": VISION_PROMPT},
+            {"role": "user", "content": user_content},
+        ],
+    )
+    raw = response.choices[0].message.content.strip()
+    if raw.startswith("```"):
+        raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+    return json.loads(raw)
+
+
 def format_reply(data: dict, today_total: int, daily_limit: int) -> str:
     """Format calorie estimate with daily progress."""
     lines = ["\U0001f37d Calorie Estimate:"]
@@ -317,6 +358,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "  chicken salad with rice\n"
         "  2 eggs, toast with butter, black coffee\n"
         "  big mac, medium fries, diet coke\n\n"
+        "\U0001f4f7 You can also send a PHOTO of your meal!\n"
+        "Add a caption for better accuracy (e.g. 'about 200g of pasta').\n\n"
         "I'll reply with calories per item, per-100g values "
         "(raw & cooked), and your daily running total.\n\n"
         "\U0001f4ca CALORIE TRACKING\n\n"
@@ -539,6 +582,33 @@ async def handle_meal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await update.message.reply_text(reply)
 
 
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle a photo message as a meal photo."""
+    photo = update.message.photo[-1]  # largest available size
+    caption = update.message.caption or ""
+
+    user = update.effective_user
+    try:
+        file = await photo.get_file()
+        image_bytes = await file.download_as_bytearray()
+        data = estimate_calories_from_photo(bytes(image_bytes), caption)
+        calories = data.get("total", 0)
+        meal_desc = caption if caption else "meal (photo)"
+        save_meal(user.id, user.username or user.first_name,
+                  update.effective_chat.id, meal_desc, calories)
+        today_total = get_today_total(user.id)
+        daily_limit = get_limit(user.id)
+        reply = format_reply(data, today_total, daily_limit)
+    except json.JSONDecodeError:
+        logger.exception("Failed to parse Groq vision response")
+        reply = "Sorry, I couldn't identify the food in this photo. Try adding a caption describing the meal."
+    except Exception:
+        logger.exception("Error estimating calories from photo")
+        reply = "Something went wrong analyzing the photo. Please try again."
+
+    await update.message.reply_text(reply)
+
+
 # ---------------------------------------------------------------------------
 # Water reminder job
 # ---------------------------------------------------------------------------
@@ -590,6 +660,7 @@ def main() -> None:
 
     # Meal handler (must be last so commands are matched first)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_meal))
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
 
     # Schedule water reminders
     for hour, minute, amount in WATER_SCHEDULE:
