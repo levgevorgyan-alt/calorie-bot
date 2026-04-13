@@ -66,6 +66,25 @@ All timestamps are ISO 8601 UTC. Day boundaries are midnight UTC.
 - Users are identified by Telegram numeric `user_id`. Each user's data is independent.
 - Water reminders are sent at 11:00, 14:00, 16:00, 18:00, 20:00 UTC to chats
   that have opted in via `/reminders on`.
+- Users can reset their own data with `/reset meals`, `/reset water`, or `/reset all`.
+- `/help` shows all commands organized by category with inline usage examples.
+
+## Bot Commands Reference
+| Command | Description | Example |
+|---------|-------------|---------|
+| *(plain text)* | Estimate calories for a meal | `chicken salad with rice` |
+| `/start` | Welcome message | `/start` |
+| `/help` | Full command list with examples | `/help` |
+| `/today` | Today's meals and calorie total | `/today` |
+| `/week` | 7-day calorie summary | `/week` |
+| `/setlimit <kcal>` | Set daily calorie limit (500-10000) | `/setlimit 2200` |
+| `/limit` | Show current calorie limit | `/limit` |
+| `/water <ml>` | Log water intake | `/water 500` |
+| `/watertoday` | Today's water total vs 2000ml target | `/watertoday` |
+| `/reminders on/off` | Toggle water reminders for this chat | `/reminders on` |
+| `/reset meals` | Clear today's meal logs | `/reset meals` |
+| `/reset water` | Clear today's water logs | `/reset water` |
+| `/reset all` | Delete all user data (meals, water, limit) | `/reset all` |
 
 ## Running Locally
 ```bash
