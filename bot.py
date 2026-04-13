@@ -601,14 +601,14 @@ def scale_macros(base_calories: int, new_calories: int,
 
 
 def generate_meal_plan(targets: dict, profile: dict, prefs: dict) -> dict:
-    """Generate a 7-day meal plan via AI based on user profile and preferences."""
+    """Generate a 7-day meal plan via AI in 3 parts to stay within token limits."""
     schedule_str = ", ".join(
         f"{s['meal']} at {s['time']}" for s in prefs["schedule"]
     )
     excludes_str = ", ".join(prefs["excludes"]) if prefs["excludes"] else "none"
     goal_desc = GOALS.get(prefs["goal"], prefs["goal"])
 
-    user_msg = (
+    base_context = (
         f"IMPORTANT: Each day MUST total {targets['daily_limit']} kcal "
         f"(within 5%). Do NOT go below this.\n\n"
         f"Daily targets: {targets['daily_limit']} kcal, "
@@ -623,16 +623,82 @@ def generate_meal_plan(targets: dict, profile: dict, prefs: dict) -> dict:
         f"activity: {profile.get('activity', 'moderate')}"
     )
 
+    day_groups = [
+        ["Monday", "Tuesday", "Wednesday"],
+        ["Thursday", "Friday"],
+        ["Saturday", "Sunday"],
+    ]
+
+    days_prompt = (
+        "You are a professional dietitian. Create meal plans for the specified days "
+        "based on the user's profile and preferences. "
+        "Return ONLY valid JSON with no extra text.\n\n"
+        "CRITICAL: Each day MUST hit the daily calorie target within 5%.\n"
+        "Each day MUST hit the protein target within 10%.\n"
+        "Distribute calories across all meal slots.\n"
+        "Respect excluded foods strictly. Vary meals - no repeats.\n"
+        "For lose_weight: high-protein, high-fiber. "
+        "For gain_muscle: high-protein, calorie-dense.\n\n"
+        "JSON format:\n"
+        '{"days": [{"day": "<name>", "meals": [{"slot": "<meal>", "time": "<HH:MM>", '
+        '"name": "<dish>", "ingredients": ["<item qty>", ...], '
+        '"calories": <int>, "protein_g": <int>, "fat_g": <int>, "carbs_g": <int>}], '
+        '"day_total": {"calories": <int>, "protein_g": <int>, "fat_g": <int>, '
+        '"carbs_g": <int>}}]}'
+    )
+
+    all_days = []
+    all_ingredients = []
+
+    for group in day_groups:
+        day_names = ", ".join(group)
+        user_msg = f"{base_context}\n\nGenerate meals for: {day_names}"
+        response = groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            temperature=0.5,
+            max_tokens=8000,
+            messages=[
+                {"role": "system", "content": days_prompt},
+                {"role": "user", "content": user_msg},
+            ],
+        )
+        part = _parse_ai_json(response.choices[0].message.content)
+        for day in part.get("days", []):
+            all_days.append(day)
+            for meal in day.get("meals", []):
+                all_ingredients.extend(meal.get("ingredients", []))
+
+    # Generate shopping list from all ingredients
+    shoplist_prompt = (
+        "You are a dietitian assistant. Given this list of ingredients used across "
+        "a 7-day meal plan, create a consolidated weekly shopping list. "
+        "Combine duplicate items, sum quantities. Estimate realistic prices in "
+        f"{prefs['budget_currency']}. Budget is {prefs['budget_amount']} "
+        f"{prefs['budget_currency']}.\n"
+        "Return ONLY valid JSON:\n"
+        '{"shopping_list": [{"item": "<name>", "quantity": "<amount>", '
+        '"estimated_cost": <float>}], "total_cost": <float>, '
+        f'"currency": "{prefs["budget_currency"]}"' + "}"
+    )
+
+    ingredients_str = "\n".join(f"- {ing}" for ing in all_ingredients)
     response = groq_client.chat.completions.create(
         model="llama-3.3-70b-versatile",
-        temperature=0.5,
-        max_tokens=16000,
+        temperature=0.3,
+        max_tokens=4000,
         messages=[
-            {"role": "system", "content": MEALPLAN_PROMPT},
-            {"role": "user", "content": user_msg},
+            {"role": "system", "content": shoplist_prompt},
+            {"role": "user", "content": f"Ingredients:\n{ingredients_str}"},
         ],
     )
-    return _parse_ai_json(response.choices[0].message.content)
+    shoplist_data = _parse_ai_json(response.choices[0].message.content)
+
+    return {
+        "days": all_days,
+        "shopping_list": shoplist_data.get("shopping_list", []),
+        "total_cost": shoplist_data.get("total_cost", 0),
+        "currency": shoplist_data.get("currency", prefs["budget_currency"]),
+    }
 
 
 def format_reply(data: dict, today: dict, targets: dict) -> str:
@@ -1277,7 +1343,8 @@ async def mealplan_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
 
     await update.message.reply_text(
-        "\u2699\ufe0f Generating your 7-day meal plan... This may take a moment."
+        "\u2699\ufe0f Generating your 7-day meal plan...\n"
+        "This takes ~30 seconds (4 AI calls). Please wait."
     )
 
     try:
