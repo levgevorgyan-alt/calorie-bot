@@ -79,6 +79,52 @@ Total: ~302 kcal
 
 Daily target: 2000ml
 
+### Reset
+- `/reset meals` - Clear today's meal logs
+- `/reset water` - Clear today's water logs
+- `/reset all` - Delete all your data (meals, water, limit resets to default)
+
+### Examples
+
+**Log a meal** (just type it):
+```
+chicken salad with rice
+2 eggs, toast with butter, black coffee
+big mac, medium fries, diet coke
+```
+
+**Set a calorie limit:**
+```
+/setlimit 2200
+```
+
+**Log water:**
+```
+/water 500
+```
+
+**Check daily progress:**
+```
+/today
+/watertoday
+```
+
+**Weekly summary:**
+```
+/week
+```
+
+**Enable water reminders in a group:**
+```
+/reminders on
+```
+
+**Reset today's data:**
+```
+/reset meals
+/reset water
+```
+
 ## Notes
 
 - Render free tier spins down after 15 min of inactivity. First message after idle has a ~30s cold start.
