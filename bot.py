@@ -79,14 +79,24 @@ VISION_PROMPT = (
 PROFILE_PROMPT = (
     "You are a nutrition expert. Based on the following person's measurements, "
     "recommend their optimal daily calorie intake and macronutrient targets "
-    "for maintaining a healthy weight with moderate activity level. "
+    "for maintaining a healthy weight at their specified activity level. "
     "Return ONLY valid JSON with no extra text:\n"
     '{"daily_calories": <int>, "daily_protein_g": <int>, '
     '"daily_fat_g": <int>, "daily_carbs_g": <int>}\n\n'
-    "Use established nutrition science (Mifflin-St Jeor for BMR, moderate "
-    "activity multiplier ~1.55). Protein should be ~1.6-2.0g per kg bodyweight. "
+    "Use established nutrition science (Mifflin-St Jeor for BMR). "
+    "Activity multipliers: sedentary=1.2, light=1.375, moderate=1.55, "
+    "active=1.725, very_active=1.9. "
+    "Protein should be ~1.6-2.0g per kg bodyweight. "
     "Fat should be ~25-30% of calories. Remaining calories from carbs."
 )
+
+ACTIVITY_LEVELS = {
+    "sedentary": "little or no exercise",
+    "light": "exercise 1-3 days/week",
+    "moderate": "exercise 3-5 days/week",
+    "active": "exercise 6-7 days/week",
+    "very_active": "hard exercise daily or physical job",
+}
 
 # Water reminder schedule: (hour, minute, amount_ml) in UTC
 WATER_SCHEDULE = [
@@ -136,6 +146,7 @@ def db_init() -> None:
             weight_kg REAL NOT NULL,
             age INTEGER NOT NULL,
             gender TEXT NOT NULL,
+            activity TEXT NOT NULL DEFAULT 'moderate',
             rec_calories INTEGER NOT NULL DEFAULT 0,
             rec_protein_g INTEGER NOT NULL DEFAULT 0,
             rec_fat_g INTEGER NOT NULL DEFAULT 0,
@@ -177,6 +188,10 @@ def db_init() -> None:
         pass
     try:
         conn.execute("ALTER TABLE limits ADD COLUMN daily_carbs_g INTEGER NOT NULL DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE profiles ADD COLUMN activity TEXT NOT NULL DEFAULT 'moderate'")
     except sqlite3.OperationalError:
         pass
     conn.commit()
@@ -275,19 +290,20 @@ def set_targets(user_id: int, calories: int,
 
 
 def save_profile(user_id: int, height_cm: int, weight_kg: float,
-                 age: int, gender: str, rec_calories: int,
+                 age: int, gender: str, activity: str, rec_calories: int,
                  rec_protein_g: int, rec_fat_g: int, rec_carbs_g: int) -> None:
     conn = db_connect()
     conn.execute(
-        "INSERT INTO profiles (user_id, height_cm, weight_kg, age, gender,"
+        "INSERT INTO profiles (user_id, height_cm, weight_kg, age, gender, activity,"
         " rec_calories, rec_protein_g, rec_fat_g, rec_carbs_g)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         " ON CONFLICT(user_id) DO UPDATE SET height_cm = excluded.height_cm,"
         " weight_kg = excluded.weight_kg, age = excluded.age,"
-        " gender = excluded.gender, rec_calories = excluded.rec_calories,"
+        " gender = excluded.gender, activity = excluded.activity,"
+        " rec_calories = excluded.rec_calories,"
         " rec_protein_g = excluded.rec_protein_g,"
         " rec_fat_g = excluded.rec_fat_g, rec_carbs_g = excluded.rec_carbs_g",
-        (user_id, height_cm, weight_kg, age, gender,
+        (user_id, height_cm, weight_kg, age, gender, activity,
          rec_calories, rec_protein_g, rec_fat_g, rec_carbs_g),
     )
     conn.commit()
@@ -432,11 +448,11 @@ def estimate_calories_from_photo(image_bytes: bytes, caption: str = "") -> dict:
 
 
 def calculate_recommendations(height_cm: int, weight_kg: float,
-                              age: int, gender: str) -> dict:
+                              age: int, gender: str, activity: str) -> dict:
     """Ask AI to recommend daily calories and macros based on profile."""
     user_msg = (
         f"Height: {height_cm}cm, Weight: {weight_kg}kg, "
-        f"Age: {age}, Gender: {gender}"
+        f"Age: {age}, Gender: {gender}, Activity level: {activity}"
     )
     response = groq_client.chat.completions.create(
         model="llama-3.3-70b-versatile",
@@ -537,10 +553,11 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "\U0001f4f7 You can also send a PHOTO of your meal!\n"
         "Add a caption for better accuracy (e.g. 'about 200g of pasta').\n\n"
         "\U0001f464 PROFILE & TARGETS\n\n"
-        "/profile <height_cm> <weight_kg> <age> <gender>\n"
+        "/profile <height_cm> <weight_kg> <age> <gender> <activity>\n"
         "  Set your measurements for personalized recommendations\n"
-        "  example: /profile 180 75 28 male\n"
-        "  example: /profile 165 60 25 female\n\n"
+        "  example: /profile 180 75 28 male moderate\n"
+        "  example: /profile 165 60 25 female light\n"
+        "  Activity: sedentary, light, moderate, active, very_active\n\n"
         "/myprofile - show your profile and daily targets\n\n"
         "/macros - show today's macro progress (P/F/C)\n\n"
         "\U0001f4ca CALORIE TRACKING\n\n"
@@ -564,10 +581,14 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not context.args or len(context.args) < 4:
+    if not context.args or len(context.args) < 5:
+        activity_list = "\n".join(
+            f"  {k} - {v}" for k, v in ACTIVITY_LEVELS.items()
+        )
         await update.message.reply_text(
-            "Usage: /profile <height_cm> <weight_kg> <age> <gender>\n"
-            "Example: /profile 180 75 28 male"
+            "Usage: /profile <height_cm> <weight_kg> <age> <gender> <activity>\n\n"
+            f"Activity levels:\n{activity_list}\n\n"
+            "Example: /profile 180 75 28 male moderate"
         )
         return
 
@@ -576,9 +597,10 @@ async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         weight_kg = float(context.args[1])
         age = int(context.args[2])
         gender = context.args[3].lower()
+        activity = context.args[4].lower()
     except (ValueError, IndexError):
         await update.message.reply_text(
-            "Invalid input. Example: /profile 180 75 28 male"
+            "Invalid input. Example: /profile 180 75 28 male moderate"
         )
         return
 
@@ -594,17 +616,25 @@ async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if gender not in ("male", "female"):
         await update.message.reply_text("Gender must be 'male' or 'female'.")
         return
+    if activity not in ACTIVITY_LEVELS:
+        activity_list = "\n".join(
+            f"  {k} - {v}" for k, v in ACTIVITY_LEVELS.items()
+        )
+        await update.message.reply_text(
+            f"Invalid activity level. Choose one:\n{activity_list}"
+        )
+        return
 
     await update.message.reply_text("\u2699\ufe0f Calculating your recommendations...")
 
     try:
-        recs = calculate_recommendations(height_cm, weight_kg, age, gender)
+        recs = calculate_recommendations(height_cm, weight_kg, age, gender, activity)
         rec_cal = recs["daily_calories"]
         rec_p = recs["daily_protein_g"]
         rec_f = recs["daily_fat_g"]
         rec_c = recs["daily_carbs_g"]
 
-        save_profile(update.effective_user.id, height_cm, weight_kg, age, gender,
+        save_profile(update.effective_user.id, height_cm, weight_kg, age, gender, activity,
                      rec_cal, rec_p, rec_f, rec_c)
         # Set as active targets
         set_targets(update.effective_user.id, rec_cal, rec_p, rec_f, rec_c)
@@ -612,7 +642,8 @@ async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await update.message.reply_text(
             f"\u2705 Profile saved!\n\n"
             f"Height: {height_cm}cm | Weight: {weight_kg}kg\n"
-            f"Age: {age} | Gender: {gender}\n\n"
+            f"Age: {age} | Gender: {gender}\n"
+            f"Activity: {activity} ({ACTIVITY_LEVELS[activity]})\n\n"
             f"\U0001f3af Daily Recommendations:\n"
             f"Calories: {rec_cal} kcal\n"
             f"Protein: {rec_p}g\n"
@@ -632,16 +663,19 @@ async def myprofile_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     profile = get_profile(update.effective_user.id)
     if not profile:
         await update.message.reply_text(
-            "No profile set. Use /profile <height_cm> <weight_kg> <age> <gender>\n"
-            "Example: /profile 180 75 28 male"
+            "No profile set. Use /profile <height_cm> <weight_kg> <age> <gender> <activity>\n"
+            "Example: /profile 180 75 28 male moderate"
         )
         return
 
+    activity = profile.get('activity', 'moderate')
+    activity_desc = ACTIVITY_LEVELS.get(activity, '')
     targets = get_targets(update.effective_user.id)
     await update.message.reply_text(
         f"\U0001f464 Your Profile:\n"
         f"Height: {profile['height_cm']}cm | Weight: {profile['weight_kg']}kg\n"
-        f"Age: {profile['age']} | Gender: {profile['gender']}\n\n"
+        f"Age: {profile['age']} | Gender: {profile['gender']}\n"
+        f"Activity: {activity} ({activity_desc})\n\n"
         f"\U0001f3af AI Recommendations:\n"
         f"Calories: {profile['rec_calories']} kcal\n"
         f"P: {profile['rec_protein_g']}g | F: {profile['rec_fat_g']}g"
