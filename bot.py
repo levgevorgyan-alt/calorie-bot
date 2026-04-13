@@ -295,7 +295,7 @@ def estimate_calories_from_photo(image_bytes: bytes, caption: str = "") -> dict:
         },
     ]
     response = groq_client.chat.completions.create(
-        model="llama-3.2-90b-vision-preview",
+        model="llama-3.2-11b-vision-preview",
         temperature=0.3,
         messages=[
             {"role": "system", "content": VISION_PROMPT},
