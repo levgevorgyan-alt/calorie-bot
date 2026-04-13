@@ -216,6 +216,37 @@ def get_reminder_chats() -> list[int]:
     return [r["chat_id"] for r in rows]
 
 
+def reset_today_meals(user_id: int) -> None:
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    conn = db_connect()
+    conn.execute(
+        "DELETE FROM meals WHERE user_id = ? AND created_at LIKE ?",
+        (user_id, f"{today}%"),
+    )
+    conn.commit()
+    conn.close()
+
+
+def reset_today_water(user_id: int) -> None:
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    conn = db_connect()
+    conn.execute(
+        "DELETE FROM water WHERE user_id = ? AND created_at LIKE ?",
+        (user_id, f"{today}%"),
+    )
+    conn.commit()
+    conn.close()
+
+
+def reset_all_data(user_id: int) -> None:
+    conn = db_connect()
+    conn.execute("DELETE FROM meals WHERE user_id = ?", (user_id,))
+    conn.execute("DELETE FROM water WHERE user_id = ?", (user_id,))
+    conn.execute("DELETE FROM limits WHERE user_id = ?", (user_id,))
+    conn.commit()
+    conn.close()
+
+
 # ---------------------------------------------------------------------------
 # Calorie estimation
 # ---------------------------------------------------------------------------
@@ -291,7 +322,11 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/water <ml> - log water (e.g. /water 500)\n"
         "/watertoday - show today's water intake\n"
         "/reminders on - enable water reminders in this chat\n"
-        "/reminders off - disable water reminders"
+        "/reminders off - disable water reminders\n\n"
+        "Reset:\n"
+        "/reset meals - clear today's meals\n"
+        "/reset water - clear today's water\n"
+        "/reset all - delete all your data"
     )
 
 
@@ -428,6 +463,36 @@ async def reminders_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await update.message.reply_text("Usage: /reminders on  or  /reminders off")
 
 
+async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not context.args:
+        await update.message.reply_text(
+            "Usage:\n"
+            "/reset meals - clear today's meal logs\n"
+            "/reset water - clear today's water logs\n"
+            "/reset all - delete all your data (meals, water, limit)"
+        )
+        return
+
+    action = context.args[0].lower()
+    user_id = update.effective_user.id
+
+    if action == "meals":
+        reset_today_meals(user_id)
+        await update.message.reply_text("\u2705 Today's meal logs cleared.")
+    elif action == "water":
+        reset_today_water(user_id)
+        await update.message.reply_text("\u2705 Today's water logs cleared.")
+    elif action == "all":
+        reset_all_data(user_id)
+        await update.message.reply_text(
+            "\u2705 All your data has been deleted (meals, water, limit reset to default)."
+        )
+    else:
+        await update.message.reply_text(
+            "Unknown option. Use: /reset meals, /reset water, or /reset all"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Meal message handler
 # ---------------------------------------------------------------------------
@@ -502,6 +567,9 @@ def main() -> None:
     app.add_handler(CommandHandler("water", water_command))
     app.add_handler(CommandHandler("watertoday", watertoday_command))
     app.add_handler(CommandHandler("reminders", reminders_command))
+
+    # Reset command
+    app.add_handler(CommandHandler("reset", reset_command))
 
     # Meal handler (must be last so commands are matched first)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_meal))
