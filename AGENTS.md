@@ -48,7 +48,7 @@ Five tables in SQLite (`calories.db`):
 
 - **meals** - `id`, `user_id`, `username`, `chat_id`, `meal_text`, `calories`, `protein_g`, `fat_g`, `carbs_g`, `created_at`
 - **limits** - `user_id` (PK), `daily_limit`, `daily_protein_g`, `daily_fat_g`, `daily_carbs_g`
-- **profiles** - `user_id` (PK), `height_cm`, `weight_kg`, `age`, `gender`, `rec_calories`, `rec_protein_g`, `rec_fat_g`, `rec_carbs_g`
+- **profiles** - `user_id` (PK), `height_cm`, `weight_kg`, `age`, `gender`, `activity`, `rec_calories`, `rec_protein_g`, `rec_fat_g`, `rec_carbs_g`
 - **water** - `id`, `user_id`, `username`, `chat_id`, `amount_ml`, `created_at`
 - **reminder_chats** - `chat_id` (PK)
 
@@ -75,8 +75,9 @@ All timestamps are ISO 8601 UTC. Day boundaries are midnight UTC.
   vs. their targets.
 - Users are identified by Telegram numeric `user_id`. Each user's data is independent.
 - Users set their body measurements via `/profile` (height cm, weight kg, age,
-  gender). The AI calculates recommended daily calories and macros using
-  Mifflin-St Jeor BMR with moderate activity, which become the user's active targets.
+  gender, activity level). The AI calculates recommended daily calories and macros
+  using Mifflin-St Jeor BMR with the specified activity multiplier (sedentary=1.2,
+  light=1.375, moderate=1.55, active=1.725, very_active=1.9).
 - When `/setlimit` changes the calorie target, macro targets are scaled
   proportionally based on the original AI recommendations from the profile.
 - Water reminders are sent at 11:00, 14:00, 16:00, 18:00, 20:00 UTC to chats
@@ -91,7 +92,7 @@ All timestamps are ISO 8601 UTC. Day boundaries are midnight UTC.
 | *(photo)* | Estimate from a meal photo | Send a photo, optionally with caption |
 | `/start` | Welcome message | `/start` |
 | `/help` | Full command list with examples | `/help` |
-| `/profile <h> <w> <age> <gender>` | Set body measurements for personalized targets | `/profile 180 75 28 male` |
+| `/profile <h> <w> <age> <gender> <activity>` | Set body measurements and activity level | `/profile 180 75 28 male moderate` |
 | `/myprofile` | Show profile and daily targets | `/myprofile` |
 | `/macros` | Today's macro progress (P/F/C) | `/macros` |
 | `/today` | Today's meals, calories, and macros | `/today` |
