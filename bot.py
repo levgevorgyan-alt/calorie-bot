@@ -3,7 +3,7 @@ import logging
 import os
 import sys
 
-from openai import OpenAI
+from google import genai
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -20,11 +20,11 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
+GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")
 PORT = int(os.environ.get("PORT", "10000"))
 
-openai_client = OpenAI(api_key=OPENAI_API_KEY)
+gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
 SYSTEM_PROMPT = (
     "You are a nutrition assistant. Given a meal description, estimate calories "
@@ -36,16 +36,12 @@ SYSTEM_PROMPT = (
 
 
 def estimate_calories(meal_text: str) -> dict:
-    """Send meal description to OpenAI and return parsed JSON."""
-    response = openai_client.chat.completions.create(
-        model="gpt-4o-mini",
-        temperature=0.3,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": meal_text},
-        ],
+    """Send meal description to Gemini and return parsed JSON."""
+    response = gemini_client.models.generate_content(
+        model="gemini-2.0-flash",
+        contents=f"{SYSTEM_PROMPT}\n\nMeal: {meal_text}",
     )
-    raw = response.choices[0].message.content.strip()
+    raw = response.text.strip()
     # Strip markdown code fences if present
     if raw.startswith("```"):
         raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
