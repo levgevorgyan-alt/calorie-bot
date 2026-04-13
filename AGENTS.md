@@ -9,6 +9,7 @@ sends scheduled water reminders.
 - **Language:** Python 3.9+
 - **Telegram SDK:** `python-telegram-bot` v20+ (async, webhook mode with job-queue)
 - **AI Provider:** Groq API with `llama-3.3-70b-versatile` model
+- **AI Vision:** Groq API with `llama-3.2-90b-vision-preview` model (photo analysis)
 - **Database:** SQLite (single file `calories.db`)
 - **Hosting:** Render (web service, webhook-based)
 
@@ -30,12 +31,14 @@ structure. The file is organized into these sections:
 2. **Database helpers** - `db_connect()`, `db_init()`, CRUD functions for meals,
    water, limits, and reminder_chats tables
 3. **Calorie estimation** - `estimate_calories()` calls Groq, `format_reply()`
-   builds the Telegram response
+   builds the Telegram response. `estimate_calories_from_photo()` uses the
+   vision model for photo-based estimation.
 4. **Command handlers** - async functions for `/start`, `/help`, `/today`,
    `/week`, `/setlimit`, `/limit`, `/water`, `/watertoday`, `/reminders`, `/reset`
 5. **Meal handler** - `handle_meal()` processes any non-command text message
-6. **Water reminder job** - `send_water_reminder()` runs on a daily schedule
-7. **Main** - wires handlers, registers scheduled jobs, starts webhook or polling
+6. **Photo handler** - `handle_photo()` downloads the photo, sends to vision model
+7. **Water reminder job** - `send_water_reminder()` runs on a daily schedule
+8. **Main** - wires handlers, registers scheduled jobs, starts webhook or polling
 
 ## Database Schema
 Four tables in SQLite (`calories.db`):
@@ -59,6 +62,8 @@ All timestamps are ISO 8601 UTC. Day boundaries are midnight UTC.
 ## Key Behaviors
 - Every non-command text message is treated as a meal description and sent to the
   AI for calorie estimation.
+- Photo messages are analyzed using Groq's vision model (`llama-3.2-90b-vision-preview`)
+  to identify food items and estimate calories. Captions are passed as extra context.
 - The AI returns JSON with per-item calories, portion sizes, and per-100g values
   for both raw and cooked.
 - Each meal reply includes the user's daily running total and remaining calories
@@ -73,6 +78,7 @@ All timestamps are ISO 8601 UTC. Day boundaries are midnight UTC.
 | Command | Description | Example |
 |---------|-------------|---------|
 | *(plain text)* | Estimate calories for a meal | `chicken salad with rice` |
+| *(photo)* | Estimate calories from a meal photo | Send a photo, optionally with caption |
 | `/start` | Welcome message | `/start` |
 | `/help` | Full command list with examples | `/help` |
 | `/today` | Today's meals and calorie total | `/today` |
