@@ -9,7 +9,7 @@ sends scheduled water reminders.
 - **Language:** Python 3.9+
 - **Telegram SDK:** `python-telegram-bot` v20+ (async, webhook mode with job-queue)
 - **AI Provider:** Groq API with `llama-3.3-70b-versatile` model
-- **AI Vision:** Groq API with `llama-3.2-90b-vision-preview` model (photo analysis)
+- **AI Vision:** Groq API with `llama-3.2-11b-vision-preview` model (photo analysis)
 - **Database:** SQLite (single file `calories.db`)
 - **Hosting:** Render (web service, webhook-based)
 
