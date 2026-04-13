@@ -35,9 +35,15 @@ groq_client = Groq(api_key=GROQ_API_KEY)
 SYSTEM_PROMPT = (
     "You are a nutrition assistant. Given a meal description, estimate calories "
     "for each item and provide a total. Return ONLY valid JSON with no extra text: "
-    '{"items": [{"name": "<food>", "calories": <int>}], "total": <int>}. '
-    "Use reasonable portion sizes. If a description is unclear, make your best "
-    "estimate and note assumptions in a short 'note' field."
+    '{"items": [{"name": "<food>", "portion": "<weight or description>", '
+    '"calories": <int>, "per_100g_raw": <int>, "per_100g_cooked": <int>}], '
+    '"total": <int>}. '
+    "If the user does not specify a weight, assume a reasonable portion and state it "
+    "in the 'portion' field (e.g. '150g', '1 medium'). Always include per_100g_raw "
+    "and per_100g_cooked for each item. If raw and cooked values are the same "
+    "(e.g. for bread, drinks), use the same number for both. "
+    "If a description is unclear, make your best estimate and note assumptions "
+    "in a short 'note' field."
 )
 
 # Water reminder schedule: (hour, minute, amount_ml) in UTC
@@ -234,7 +240,14 @@ def format_reply(data: dict, today_total: int, daily_limit: int) -> str:
     """Format calorie estimate with daily progress."""
     lines = ["\U0001f37d Calorie Estimate:"]
     for item in data.get("items", []):
-        lines.append(f"- {item['name']}: ~{item['calories']} kcal")
+        portion = item.get('portion', '')
+        portion_str = f" ({portion})" if portion else ""
+        raw = item.get('per_100g_raw', '?')
+        cooked = item.get('per_100g_cooked', '?')
+        lines.append(
+            f"- {item['name']}{portion_str}: ~{item['calories']} kcal"
+            f"\n  per 100g: {raw} raw / {cooked} cooked"
+        )
     lines.append(f"\nTotal: ~{data['total']} kcal")
     note = data.get("note")
     if note:
