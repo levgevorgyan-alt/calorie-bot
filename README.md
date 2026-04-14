@@ -9,6 +9,7 @@ scheduled water reminders.
 
 1. Create a Telegram bot via [@BotFather](https://t.me/BotFather) and save the token.
 2. Get a free Groq API key from [console.groq.com](https://console.groq.com).
+3. Create a free [Supabase](https://supabase.com) project and copy the database connection string.
 
 ## Local Development
 
@@ -17,6 +18,7 @@ pip install -r requirements.txt
 
 export TELEGRAM_BOT_TOKEN="your-token"
 export GROQ_API_KEY="your-key"
+export DATABASE_URL="postgresql://postgres:password@db.xxxxx.supabase.co:5432/postgres"
 
 # Run in polling mode (no webhook needed locally)
 python bot.py --poll
@@ -32,6 +34,7 @@ python bot.py --poll
 6. Add environment variables under **Environment**:
    - `TELEGRAM_BOT_TOKEN` - your bot token from BotFather
    - `GROQ_API_KEY` - your Groq API key
+   - `DATABASE_URL` - your Supabase PostgreSQL connection string
    - `WEBHOOK_URL` - the URL Render assigns (e.g. `https://calorie-bot.onrender.com`)
 7. Click **Deploy**.
 
@@ -174,6 +177,6 @@ Send a photo of your meal. Optionally add a caption like "about 200g of pasta" f
 
 - Render free tier spins down after 15 min of inactivity. First message after idle has a ~30s cold start.
 - In group chats, turn off Group Privacy via BotFather so the bot sees all messages.
-- Data is stored in SQLite. On Render free tier, data resets on redeploy.
+- Data is stored in Supabase PostgreSQL. Persists across redeploys.
 - Set your profile first with `/profile` for personalized calorie and macro recommendations.
 - Activity levels: sedentary (no exercise), light (1-3 days/week), moderate (3-5 days/week), active (6-7 days/week), very_active (hard daily exercise or physical job).

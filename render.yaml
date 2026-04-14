@@ -9,5 +9,7 @@ services:
         sync: false
       - key: GROQ_API_KEY
         sync: false
+      - key: DATABASE_URL
+        sync: false
       - key: WEBHOOK_URL
         sync: false
