@@ -1,12 +1,13 @@
 import json
 import logging
 import os
-import sqlite3
 import sys
 import base64
 from datetime import datetime, timedelta, time, timezone
 
 from groq import Groq
+import psycopg2
+import psycopg2.extras
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -27,7 +28,7 @@ GROQ_API_KEY = os.environ["GROQ_API_KEY"]
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")
 PORT = int(os.environ.get("PORT", "10000"))
 
-DB_PATH = os.environ.get("DB_PATH", "calories.db")
+DATABASE_URL = os.environ["DATABASE_URL"]
 DEFAULT_CALORIE_LIMIT = 1800
 DAILY_WATER_TARGET_ML = 2000
 
@@ -146,36 +147,55 @@ WATER_SCHEDULE = [
 # Database helpers
 # ---------------------------------------------------------------------------
 
-def db_connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
+def db_connect():
+    conn = psycopg2.connect(DATABASE_URL)
     return conn
+
+
+def db_query(sql, params=(), fetch=None):
+    """Execute a query and optionally fetch results. Returns rows as dicts."""
+    conn = db_connect()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    try:
+        cur.execute(sql, params)
+        if fetch == "one":
+            result = cur.fetchone()
+        elif fetch == "all":
+            result = cur.fetchall()
+        else:
+            result = None
+        conn.commit()
+        return result
+    finally:
+        cur.close()
+        conn.close()
 
 
 def db_init() -> None:
     conn = db_connect()
-    conn.executescript("""
-        CREATE TABLE IF NOT EXISTS meals (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
+    cur = conn.cursor()
+    tables = [
+        """CREATE TABLE IF NOT EXISTS meals (
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT NOT NULL,
             username TEXT,
-            chat_id INTEGER,
+            chat_id BIGINT,
             meal_text TEXT,
             calories INTEGER NOT NULL,
             protein_g INTEGER NOT NULL DEFAULT 0,
             fat_g INTEGER NOT NULL DEFAULT 0,
             carbs_g INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS limits (
-            user_id INTEGER PRIMARY KEY,
+        )""",
+        """CREATE TABLE IF NOT EXISTS limits (
+            user_id BIGINT PRIMARY KEY,
             daily_limit INTEGER NOT NULL DEFAULT 1800,
             daily_protein_g INTEGER NOT NULL DEFAULT 0,
             daily_fat_g INTEGER NOT NULL DEFAULT 0,
             daily_carbs_g INTEGER NOT NULL DEFAULT 0
-        );
-        CREATE TABLE IF NOT EXISTS profiles (
-            user_id INTEGER PRIMARY KEY,
+        )""",
+        """CREATE TABLE IF NOT EXISTS profiles (
+            user_id BIGINT PRIMARY KEY,
             height_cm INTEGER NOT NULL,
             weight_kg REAL NOT NULL,
             age INTEGER NOT NULL,
@@ -185,135 +205,93 @@ def db_init() -> None:
             rec_protein_g INTEGER NOT NULL DEFAULT 0,
             rec_fat_g INTEGER NOT NULL DEFAULT 0,
             rec_carbs_g INTEGER NOT NULL DEFAULT 0
-        );
-        CREATE TABLE IF NOT EXISTS water (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
+        )""",
+        """CREATE TABLE IF NOT EXISTS water (
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT NOT NULL,
             username TEXT,
-            chat_id INTEGER,
+            chat_id BIGINT,
             amount_ml INTEGER NOT NULL,
             created_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS reminder_chats (
-            chat_id INTEGER PRIMARY KEY
-        );
-        CREATE TABLE IF NOT EXISTS diet_prefs (
-            user_id INTEGER PRIMARY KEY,
+        )""",
+        """CREATE TABLE IF NOT EXISTS reminder_chats (
+            chat_id BIGINT PRIMARY KEY
+        )""",
+        """CREATE TABLE IF NOT EXISTS diet_prefs (
+            user_id BIGINT PRIMARY KEY,
             goal TEXT NOT NULL DEFAULT 'maintain',
             schedule TEXT NOT NULL DEFAULT '[]',
             excludes TEXT NOT NULL DEFAULT '[]',
             budget_amount REAL NOT NULL DEFAULT 0,
             budget_currency TEXT NOT NULL DEFAULT 'EUR'
-        );
-        CREATE TABLE IF NOT EXISTS meal_plans (
-            user_id INTEGER PRIMARY KEY,
+        )""",
+        """CREATE TABLE IF NOT EXISTS meal_plans (
+            user_id BIGINT PRIMARY KEY,
             week_start TEXT NOT NULL,
             plan_json TEXT NOT NULL,
             shoplist_json TEXT NOT NULL,
             created_at TEXT NOT NULL
-        );
-    """)
-    # Migrate older meals table that may lack macro columns
-    try:
-        conn.execute("ALTER TABLE meals ADD COLUMN protein_g INTEGER NOT NULL DEFAULT 0")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        conn.execute("ALTER TABLE meals ADD COLUMN fat_g INTEGER NOT NULL DEFAULT 0")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        conn.execute("ALTER TABLE meals ADD COLUMN carbs_g INTEGER NOT NULL DEFAULT 0")
-    except sqlite3.OperationalError:
-        pass
-    # Migrate limits table
-    try:
-        conn.execute("ALTER TABLE limits ADD COLUMN daily_protein_g INTEGER NOT NULL DEFAULT 0")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        conn.execute("ALTER TABLE limits ADD COLUMN daily_fat_g INTEGER NOT NULL DEFAULT 0")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        conn.execute("ALTER TABLE limits ADD COLUMN daily_carbs_g INTEGER NOT NULL DEFAULT 0")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        conn.execute("ALTER TABLE profiles ADD COLUMN activity TEXT NOT NULL DEFAULT 'moderate'")
-    except sqlite3.OperationalError:
-        pass
+        )""",
+    ]
+    for sql in tables:
+        cur.execute(sql)
     conn.commit()
+    cur.close()
     conn.close()
 
 
 def save_meal(user_id: int, username: str, chat_id: int,
               meal_text: str, calories: int,
               protein_g: int = 0, fat_g: int = 0, carbs_g: int = 0) -> None:
-    conn = db_connect()
-    conn.execute(
+    db_query(
         "INSERT INTO meals (user_id, username, chat_id, meal_text, calories,"
-        " protein_g, fat_g, carbs_g, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        " protein_g, fat_g, carbs_g, created_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
         (user_id, username, chat_id, meal_text, calories,
-         protein_g, fat_g, carbs_g,
-         datetime.now(timezone.utc).isoformat()),
+         protein_g, fat_g, carbs_g, datetime.now(timezone.utc).isoformat()),
     )
-    conn.commit()
-    conn.close()
 
 
 def get_today_meals(user_id: int) -> list[dict]:
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    conn = db_connect()
-    rows = conn.execute(
+    rows = db_query(
         "SELECT meal_text, calories, protein_g, fat_g, carbs_g, created_at"
-        " FROM meals WHERE user_id = ? AND created_at LIKE ?",
-        (user_id, f"{today}%"),
-    ).fetchall()
-    conn.close()
+        " FROM meals WHERE user_id = %s AND created_at LIKE %s",
+        (user_id, f"{today}%"), fetch="all",
+    )
     return [dict(r) for r in rows]
 
 
 def get_today_totals(user_id: int) -> dict:
-    """Return today's total calories and macros."""
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    conn = db_connect()
-    row = conn.execute(
+    row = db_query(
         "SELECT COALESCE(SUM(calories), 0) AS calories,"
         " COALESCE(SUM(protein_g), 0) AS protein_g,"
         " COALESCE(SUM(fat_g), 0) AS fat_g,"
         " COALESCE(SUM(carbs_g), 0) AS carbs_g"
-        " FROM meals WHERE user_id = ? AND created_at LIKE ?",
-        (user_id, f"{today}%"),
-    ).fetchone()
-    conn.close()
+        " FROM meals WHERE user_id = %s AND created_at LIKE %s",
+        (user_id, f"{today}%"), fetch="one",
+    )
     return dict(row)
 
 
 def get_week_summary(user_id: int) -> list[dict]:
-    """Return daily totals for the last 7 days."""
     since = (datetime.now(timezone.utc) - timedelta(days=6)).strftime("%Y-%m-%d")
-    conn = db_connect()
-    rows = conn.execute(
-        "SELECT SUBSTR(created_at, 1, 10) AS day, SUM(calories) AS total,"
+    rows = db_query(
+        "SELECT SUBSTRING(created_at, 1, 10) AS day, SUM(calories) AS total,"
         " SUM(protein_g) AS protein_g, SUM(fat_g) AS fat_g,"
         " SUM(carbs_g) AS carbs_g"
-        " FROM meals WHERE user_id = ? AND created_at >= ?"
+        " FROM meals WHERE user_id = %s AND created_at >= %s"
         " GROUP BY day ORDER BY day",
-        (user_id, since),
-    ).fetchall()
-    conn.close()
+        (user_id, since), fetch="all",
+    )
     return [dict(r) for r in rows]
 
 
 def get_targets(user_id: int) -> dict:
-    """Return daily calorie and macro targets for a user."""
-    conn = db_connect()
-    row = conn.execute(
+    row = db_query(
         "SELECT daily_limit, daily_protein_g, daily_fat_g, daily_carbs_g"
-        " FROM limits WHERE user_id = ?", (user_id,)
-    ).fetchone()
-    conn.close()
+        " FROM limits WHERE user_id = %s", (user_id,), fetch="one",
+    )
     if row:
         return dict(row)
     return {
@@ -324,173 +302,142 @@ def get_targets(user_id: int) -> dict:
 
 def set_targets(user_id: int, calories: int,
                 protein_g: int = 0, fat_g: int = 0, carbs_g: int = 0) -> None:
-    conn = db_connect()
-    conn.execute(
+    db_query(
         "INSERT INTO limits (user_id, daily_limit, daily_protein_g, daily_fat_g,"
-        " daily_carbs_g) VALUES (?, ?, ?, ?, ?)"
-        " ON CONFLICT(user_id) DO UPDATE SET daily_limit = excluded.daily_limit,"
-        " daily_protein_g = excluded.daily_protein_g,"
-        " daily_fat_g = excluded.daily_fat_g,"
-        " daily_carbs_g = excluded.daily_carbs_g",
+        " daily_carbs_g) VALUES (%s,%s,%s,%s,%s)"
+        " ON CONFLICT(user_id) DO UPDATE SET daily_limit = EXCLUDED.daily_limit,"
+        " daily_protein_g = EXCLUDED.daily_protein_g,"
+        " daily_fat_g = EXCLUDED.daily_fat_g,"
+        " daily_carbs_g = EXCLUDED.daily_carbs_g",
         (user_id, calories, protein_g, fat_g, carbs_g),
     )
-    conn.commit()
-    conn.close()
 
 
 def save_profile(user_id: int, height_cm: int, weight_kg: float,
                  age: int, gender: str, activity: str, rec_calories: int,
                  rec_protein_g: int, rec_fat_g: int, rec_carbs_g: int) -> None:
-    conn = db_connect()
-    conn.execute(
+    db_query(
         "INSERT INTO profiles (user_id, height_cm, weight_kg, age, gender, activity,"
         " rec_calories, rec_protein_g, rec_fat_g, rec_carbs_g)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-        " ON CONFLICT(user_id) DO UPDATE SET height_cm = excluded.height_cm,"
-        " weight_kg = excluded.weight_kg, age = excluded.age,"
-        " gender = excluded.gender, activity = excluded.activity,"
-        " rec_calories = excluded.rec_calories,"
-        " rec_protein_g = excluded.rec_protein_g,"
-        " rec_fat_g = excluded.rec_fat_g, rec_carbs_g = excluded.rec_carbs_g",
+        " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"
+        " ON CONFLICT(user_id) DO UPDATE SET height_cm = EXCLUDED.height_cm,"
+        " weight_kg = EXCLUDED.weight_kg, age = EXCLUDED.age,"
+        " gender = EXCLUDED.gender, activity = EXCLUDED.activity,"
+        " rec_calories = EXCLUDED.rec_calories,"
+        " rec_protein_g = EXCLUDED.rec_protein_g,"
+        " rec_fat_g = EXCLUDED.rec_fat_g, rec_carbs_g = EXCLUDED.rec_carbs_g",
         (user_id, height_cm, weight_kg, age, gender, activity,
          rec_calories, rec_protein_g, rec_fat_g, rec_carbs_g),
     )
-    conn.commit()
-    conn.close()
 
 
 def get_profile(user_id: int) -> dict | None:
-    conn = db_connect()
-    row = conn.execute(
-        "SELECT * FROM profiles WHERE user_id = ?", (user_id,)
-    ).fetchone()
-    conn.close()
+    row = db_query(
+        "SELECT * FROM profiles WHERE user_id = %s", (user_id,), fetch="one",
+    )
     return dict(row) if row else None
 
 
 def save_water(user_id: int, username: str, chat_id: int, amount_ml: int) -> None:
-    conn = db_connect()
-    conn.execute(
+    db_query(
         "INSERT INTO water (user_id, username, chat_id, amount_ml, created_at)"
-        " VALUES (?, ?, ?, ?, ?)",
+        " VALUES (%s,%s,%s,%s,%s)",
         (user_id, username, chat_id, amount_ml,
          datetime.now(timezone.utc).isoformat()),
     )
-    conn.commit()
-    conn.close()
 
 
 def get_today_water(user_id: int) -> int:
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    conn = db_connect()
-    row = conn.execute(
+    row = db_query(
         "SELECT COALESCE(SUM(amount_ml), 0) AS total FROM water"
-        " WHERE user_id = ? AND created_at LIKE ?",
-        (user_id, f"{today}%"),
-    ).fetchone()
-    conn.close()
+        " WHERE user_id = %s AND created_at LIKE %s",
+        (user_id, f"{today}%"), fetch="one",
+    )
     return row["total"]
 
 
 def add_reminder_chat(chat_id: int) -> None:
-    conn = db_connect()
-    conn.execute(
-        "INSERT OR IGNORE INTO reminder_chats (chat_id) VALUES (?)", (chat_id,)
+    db_query(
+        "INSERT INTO reminder_chats (chat_id) VALUES (%s)"
+        " ON CONFLICT DO NOTHING", (chat_id,),
     )
-    conn.commit()
-    conn.close()
 
 
 def remove_reminder_chat(chat_id: int) -> None:
-    conn = db_connect()
-    conn.execute("DELETE FROM reminder_chats WHERE chat_id = ?", (chat_id,))
-    conn.commit()
-    conn.close()
+    db_query("DELETE FROM reminder_chats WHERE chat_id = %s", (chat_id,))
 
 
 def get_reminder_chats() -> list[int]:
-    conn = db_connect()
-    rows = conn.execute("SELECT chat_id FROM reminder_chats").fetchall()
-    conn.close()
+    rows = db_query("SELECT chat_id FROM reminder_chats", fetch="all")
     return [r["chat_id"] for r in rows]
 
 
 def reset_today_meals(user_id: int) -> None:
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    conn = db_connect()
-    conn.execute(
-        "DELETE FROM meals WHERE user_id = ? AND created_at LIKE ?",
+    db_query(
+        "DELETE FROM meals WHERE user_id = %s AND created_at LIKE %s",
         (user_id, f"{today}%"),
     )
-    conn.commit()
-    conn.close()
 
 
 def reset_today_water(user_id: int) -> None:
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    conn = db_connect()
-    conn.execute(
-        "DELETE FROM water WHERE user_id = ? AND created_at LIKE ?",
+    db_query(
+        "DELETE FROM water WHERE user_id = %s AND created_at LIKE %s",
         (user_id, f"{today}%"),
     )
-    conn.commit()
-    conn.close()
 
 
 def reset_all_data(user_id: int) -> None:
     conn = db_connect()
-    conn.execute("DELETE FROM meals WHERE user_id = ?", (user_id,))
-    conn.execute("DELETE FROM water WHERE user_id = ?", (user_id,))
-    conn.execute("DELETE FROM limits WHERE user_id = ?", (user_id,))
-    conn.execute("DELETE FROM profiles WHERE user_id = ?", (user_id,))
-    conn.execute("DELETE FROM diet_prefs WHERE user_id = ?", (user_id,))
-    conn.execute("DELETE FROM meal_plans WHERE user_id = ?", (user_id,))
+    cur = conn.cursor()
+    for table in ("meals", "water", "limits", "profiles", "diet_prefs", "meal_plans"):
+        cur.execute(f"DELETE FROM {table} WHERE user_id = %s", (user_id,))
     conn.commit()
+    cur.close()
     conn.close()
 
 
 def save_diet_prefs(user_id: int, goal: str, schedule: list,
                     excludes: list, budget_amount: float,
                     budget_currency: str) -> None:
-    conn = db_connect()
-    conn.execute(
+    db_query(
         "INSERT INTO diet_prefs (user_id, goal, schedule, excludes,"
-        " budget_amount, budget_currency) VALUES (?, ?, ?, ?, ?, ?)"
-        " ON CONFLICT(user_id) DO UPDATE SET goal = excluded.goal,"
-        " schedule = excluded.schedule, excludes = excluded.excludes,"
-        " budget_amount = excluded.budget_amount,"
-        " budget_currency = excluded.budget_currency",
+        " budget_amount, budget_currency) VALUES (%s,%s,%s,%s,%s,%s)"
+        " ON CONFLICT(user_id) DO UPDATE SET goal = EXCLUDED.goal,"
+        " schedule = EXCLUDED.schedule, excludes = EXCLUDED.excludes,"
+        " budget_amount = EXCLUDED.budget_amount,"
+        " budget_currency = EXCLUDED.budget_currency",
         (user_id, goal, json.dumps(schedule), json.dumps(excludes),
          budget_amount, budget_currency),
     )
-    conn.commit()
-    conn.close()
 
 
 def update_diet_pref(user_id: int, **kwargs) -> None:
-    """Update specific diet preference fields."""
     conn = db_connect()
+    cur = conn.cursor()
     # Ensure row exists
-    conn.execute(
-        "INSERT OR IGNORE INTO diet_prefs (user_id, goal, schedule, excludes,"
-        " budget_amount, budget_currency) VALUES (?, 'maintain', '[]', '[]', 0, 'EUR')",
+    cur.execute(
+        "INSERT INTO diet_prefs (user_id, goal, schedule, excludes,"
+        " budget_amount, budget_currency) VALUES (%s, 'maintain', '[]', '[]', 0, 'EUR')"
+        " ON CONFLICT DO NOTHING",
         (user_id,),
     )
     for key, value in kwargs.items():
         if key in ("schedule", "excludes"):
             value = json.dumps(value)
-        conn.execute(f"UPDATE diet_prefs SET {key} = ? WHERE user_id = ?",
-                     (value, user_id))
+        cur.execute(f"UPDATE diet_prefs SET {key} = %s WHERE user_id = %s",
+                    (value, user_id))
     conn.commit()
+    cur.close()
     conn.close()
 
 
 def get_diet_prefs(user_id: int) -> dict | None:
-    conn = db_connect()
-    row = conn.execute(
-        "SELECT * FROM diet_prefs WHERE user_id = ?", (user_id,)
-    ).fetchone()
-    conn.close()
+    row = db_query(
+        "SELECT * FROM diet_prefs WHERE user_id = %s", (user_id,), fetch="one",
+    )
     if not row:
         return None
     d = dict(row)
@@ -501,26 +448,21 @@ def get_diet_prefs(user_id: int) -> dict | None:
 
 def save_meal_plan(user_id: int, week_start: str,
                    plan_json: str, shoplist_json: str) -> None:
-    conn = db_connect()
-    conn.execute(
+    db_query(
         "INSERT INTO meal_plans (user_id, week_start, plan_json, shoplist_json,"
-        " created_at) VALUES (?, ?, ?, ?, ?)"
-        " ON CONFLICT(user_id) DO UPDATE SET week_start = excluded.week_start,"
-        " plan_json = excluded.plan_json, shoplist_json = excluded.shoplist_json,"
-        " created_at = excluded.created_at",
+        " created_at) VALUES (%s,%s,%s,%s,%s)"
+        " ON CONFLICT(user_id) DO UPDATE SET week_start = EXCLUDED.week_start,"
+        " plan_json = EXCLUDED.plan_json, shoplist_json = EXCLUDED.shoplist_json,"
+        " created_at = EXCLUDED.created_at",
         (user_id, week_start, plan_json, shoplist_json,
          datetime.now(timezone.utc).isoformat()),
     )
-    conn.commit()
-    conn.close()
 
 
 def get_meal_plan(user_id: int) -> dict | None:
-    conn = db_connect()
-    row = conn.execute(
-        "SELECT * FROM meal_plans WHERE user_id = ?", (user_id,)
-    ).fetchone()
-    conn.close()
+    row = db_query(
+        "SELECT * FROM meal_plans WHERE user_id = %s", (user_id,), fetch="one",
+    )
     return dict(row) if row else None
 
 
