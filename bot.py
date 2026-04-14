@@ -1496,7 +1496,35 @@ def main() -> None:
 
     db_init()
 
-    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    # Register bot commands for all chat types (including groups)
+    async def post_init(application):
+        from telegram import BotCommand, BotCommandScopeAllGroupChats, BotCommandScopeDefault
+        commands = [
+            BotCommand("start", "Welcome message"),
+            BotCommand("help", "All commands with examples"),
+            BotCommand("profile", "Set measurements"),
+            BotCommand("myprofile", "Show profile and targets"),
+            BotCommand("macros", "Today's macro progress"),
+            BotCommand("today", "Today's meals and totals"),
+            BotCommand("week", "7-day summary"),
+            BotCommand("setlimit", "Override daily calorie limit"),
+            BotCommand("limit", "Show current limit"),
+            BotCommand("water", "Log water intake"),
+            BotCommand("watertoday", "Today's water intake"),
+            BotCommand("reminders", "Toggle water reminders"),
+            BotCommand("goal", "Set fitness goal"),
+            BotCommand("schedule", "Set eating schedule"),
+            BotCommand("exclude", "Set foods to avoid"),
+            BotCommand("budget", "Set weekly food budget"),
+            BotCommand("mealplan", "Generate 7-day meal plan"),
+            BotCommand("shoplist", "Show last shopping list"),
+            BotCommand("diet", "Show diet preferences"),
+            BotCommand("reset", "Reset your data"),
+        ]
+        await application.bot.set_my_commands(commands, scope=BotCommandScopeDefault())
+        await application.bot.set_my_commands(commands, scope=BotCommandScopeAllGroupChats())
+
+    app = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
 
     # Calorie & profile commands
     app.add_handler(CommandHandler("start", start_command))
