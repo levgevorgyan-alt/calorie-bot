@@ -12,7 +12,7 @@ descriptions and meal photos.
 - **Telegram SDK:** `python-telegram-bot` v20+ (async, webhook mode with job-queue)
 - **AI Provider:** Groq API with `llama-3.3-70b-versatile` model (text + profile)
 - **AI Vision:** Groq API with `meta-llama/llama-4-scout-17b-16e-instruct` model (photo analysis)
-- **Database:** SQLite (single file `calories.db`)
+- **Database:** PostgreSQL via Supabase (free hosted, persistent)
 - **Hosting:** Render (web service, webhook-based)
 
 ## Project Structure
@@ -63,7 +63,7 @@ All timestamps are ISO 8601 UTC. Day boundaries are midnight UTC.
 | `GROQ_API_KEY` | Yes | API key from console.groq.com |
 | `WEBHOOK_URL` | Yes (prod) | Public URL assigned by Render |
 | `PORT` | No | Defaults to 10000; Render sets automatically |
-| `DB_PATH` | No | SQLite file path; defaults to `calories.db` |
+| `DATABASE_URL` | Yes | PostgreSQL connection string from Supabase |
 
 ## Key Behaviors
 - Every non-command text message is treated as a meal description and sent to the
@@ -126,7 +126,7 @@ automatically on startup.
 - **Group privacy:** BotFather's Group Privacy must be turned OFF for the bot to
   see non-command messages in group chats.
 - **Render free tier:** The service spins down after 15 min idle (~30s cold start).
-  SQLite data is lost on redeploy.
+  Use UptimeRobot to keep it alive. Data persists in Supabase across redeploys.
 - **Groq rate limits:** Free tier allows 30 req/min. No retry logic is implemented;
   errors are caught and a fallback message is sent to the user.
 
@@ -140,5 +140,5 @@ automatically on startup.
 - The AI JSON schema includes macros (`protein_g`, `fat_g`, `carbs_g`,
   `total_protein_g`, `total_fat_g`, `total_carbs_g`) alongside calories.
   Any provider change must preserve this schema.
-- To switch to persistent storage: replace SQLite calls with a PostgreSQL client
-  (e.g. `psycopg2`). The query patterns are standard SQL and transfer directly.
+- Database uses `psycopg2` with a `db_query()` helper that handles connections,
+  cursors, and cleanup. All queries use `%s` parameter style.
