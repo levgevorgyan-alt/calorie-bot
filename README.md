@@ -78,6 +78,7 @@ Total: ~360 kcal | P: 16g | F: 23g | C: 23g
 - `/macros` - Show today's macro progress (P/F/C)
 - `/weight <kg>` - Update your weight quickly (e.g. `/weight 74.5`)
 - `/weight` - Show weight history
+- `/language` - Change language: 🇬🇧 English / 🇷🇺 Русский / 🇦🇲 Հայերեն (auto-detected from Telegram settings)
 - `/timezone` - Auto-detect timezone via location share, or set manually (`/timezone Europe/Berlin`, `/timezone UTC+3`)
 - `/export [days]` - Export meal and water logs as CSV files (default: 30 days)
 
