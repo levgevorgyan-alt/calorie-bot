@@ -2,6 +2,7 @@ import io
 import json
 import logging
 import os
+import re
 import sys
 import base64
 from datetime import datetime, timedelta, time, timezone
@@ -155,6 +156,126 @@ WATER_SCHEDULE = [
 
 # Allowlist for diet_prefs columns (prevents SQL injection in update_diet_pref)
 DIET_PREF_COLUMNS = frozenset({"goal", "schedule", "excludes", "budget_amount", "budget_currency"})
+
+# --- Food intent & clarification heuristics ---
+
+_NON_FOOD_PHRASES = frozenset({
+    "hello", "hi", "hey", "hiya", "sup", "yo",
+    "thanks", "thank you", "thx", "ty",
+    "ok", "okay", "k", "cool", "got it", "sure", "noted",
+    "bye", "goodbye", "cya", "lol", "lmao", "haha", "hehe",
+    "yes", "no", "nope", "yep", "yeah", "nah",
+    "good", "great", "nice", "awesome", "perfect",
+    "what", "who", "where", "when", "why", "how",
+    "hmm", "hm", "ugh", "oh", "ah", "aha", "test", "testing",
+})
+
+_FOOD_SIGNAL_WORDS = frozenset({
+    "eat", "ate", "had", "have", "drinking", "drank", "drink",
+    "breakfast", "lunch", "dinner", "snack", "meal",
+    "coffee", "tea", "juice", "water", "milk", "beer", "wine",
+    "egg", "eggs", "bread", "rice", "pasta", "chicken", "beef",
+    "fish", "salmon", "tuna", "cod", "salad", "soup", "pizza", "burger",
+    "sandwich", "wrap", "bowl", "plate", "glass", "cup", "slice",
+    "protein", "shake", "bar", "fruit", "apple", "banana", "orange",
+    "yogurt", "cheese", "butter", "oil", "sauce", "dressing",
+    "kcal", "cal", "calories", "grams", "portion", "serving",
+    "steak", "meat", "pork", "turkey", "shrimp", "tofu",
+    "oatmeal", "oats", "cereal", "granola", "pancake", "waffle",
+    "cookie", "cake", "chocolate", "candy", "chips", "fries",
+    "avocado", "broccoli", "spinach", "carrot", "potato", "tomato",
+    "noodles", "spaghetti", "sushi", "curry", "stew", "taco", "burrito",
+})
+
+_COOKING_METHODS = frozenset({
+    "boiled", "scrambled", "fried", "grilled", "baked", "raw", "steamed",
+    "poached", "roasted", "sauteed", "sautéed", "broiled", "smoked",
+    "hard-boiled", "soft-boiled", "sunny", "over-easy", "cooked",
+    "bbq", "barbecued", "microwaved", "toasted",
+})
+
+_NUMBER_UNIT_RE = re.compile(
+    r'\b\d+\s*(?:g|ml|oz|lb|kg|kcal|cal|mg|cup|tbsp|tsp|slice|piece|pieces|serving|servings)\b',
+    re.IGNORECASE,
+)
+
+_CLARIFICATION_QUESTIONS = {
+    frozenset({"egg", "eggs"}): (
+        "How were the egg(s) cooked?\n"
+        "  e.g. *2 scrambled eggs* · *1 boiled egg* · *fried egg in butter*"
+    ),
+    frozenset({"chicken"}): (
+        "How was the chicken cooked, and roughly how much?\n"
+        "  e.g. *150g grilled chicken breast* · *fried chicken thigh*"
+    ),
+    frozenset({"beef", "steak", "meat"}): (
+        "How was it cooked, and how much?\n"
+        "  e.g. *200g grilled beef* · *beef stir-fry with oil*"
+    ),
+    frozenset({"fish", "salmon", "tuna", "cod"}): (
+        "How was it cooked, and how much?\n"
+        "  e.g. *150g baked salmon* · *canned tuna 80g*"
+    ),
+    frozenset({"pork"}): (
+        "How was the pork cooked, and how much?\n"
+        "  e.g. *150g roasted pork* · *pork chop grilled*"
+    ),
+    frozenset({"rice"}): (
+        "How much rice?\n"
+        "  e.g. *1 cup cooked rice* · *200g white rice*"
+    ),
+    frozenset({"pasta", "noodles", "spaghetti"}): (
+        "How much, and with what sauce?\n"
+        "  e.g. *200g pasta with tomato sauce* · *100g spaghetti carbonara*"
+    ),
+    frozenset({"bread", "toast"}): (
+        "How many slices, and with anything on it?\n"
+        "  e.g. *2 slices toast with butter* · *1 slice whole wheat bread*"
+    ),
+    frozenset({"coffee"}): (
+        "How do you take your coffee?\n"
+        "  e.g. *black coffee* · *flat white* · *coffee with milk and 2 sugars*"
+    ),
+    frozenset({"tea"}): (
+        "Black, or with milk/sugar?\n"
+        "  e.g. *black tea* · *tea with milk and 1 sugar*"
+    ),
+    frozenset({"salad"}): (
+        "What's in the salad, and any dressing?\n"
+        "  e.g. *green salad with olive oil* · *Caesar salad 250g*"
+    ),
+    frozenset({"oatmeal", "oats"}): (
+        "How much, and with anything added?\n"
+        "  e.g. *50g oats with milk* · *oatmeal with banana and honey*"
+    ),
+    frozenset({"milk"}): (
+        "What kind, and how much?\n"
+        "  e.g. *200ml whole milk* · *skimmed milk 250ml*"
+    ),
+    frozenset({"juice"}): (
+        "What kind, and how much?\n"
+        "  e.g. *200ml orange juice* · *apple juice 250ml*"
+    ),
+}
+
+# Quick-start help text (used by /help and /start inline button)
+_HELP_QUICK_START = (
+    "\U0001f37d <b>Calorie Bot \u2014 Quick Start</b>\n\n"
+    "<b>Step 1</b> \u2014 Set your profile:\n"
+    "  <code>/profile 180 75 28 male moderate</code>\n\n"
+    "<b>Step 2</b> \u2014 Log meals by typing freely:\n"
+    "  <code>2 eggs and toast with butter</code>\n"
+    "  Or send a \U0001f4f7 photo of your meal!\n\n"
+    "<b>Step 3</b> \u2014 Check your day:\n"
+    "  /today \u00b7 /macros \u00b7 /watertoday\n\n"
+    "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
+    "\U0001f4ca <b>Tracking:</b> /today \u00b7 /week \u00b7 /history \u00b7 /stats\n"
+    "\U0001f4a7 <b>Water:</b> /water 500 \u00b7 /watertoday \u00b7 /reminders on\n"
+    "\U0001f957 <b>Diet plan:</b> /goal \u00b7 /schedule \u00b7 /budget \u00b7 /mealplan\n"
+    "\u2699\ufe0f <b>Settings:</b> /setlimit \u00b7 /myprofile \u00b7 /weight\n"
+    "\U0001f504 <b>Manage:</b> /delmeal \u00b7 /reset\n\n"
+    "Send <code>/help full</code> for complete command reference."
+)
 
 
 # ---------------------------------------------------------------------------
@@ -675,6 +796,55 @@ def _confidence_icon(confidence: str) -> str:
     return _CONFIDENCE_ICONS.get(confidence, "")
 
 
+def _truncate(text: str, limit: int = 40) -> str:
+    """Truncate text to limit chars, appending '…' if cut."""
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + "\u2026"
+
+
+def _looks_like_food(text: str) -> bool:
+    """Return True if the text is likely a food description, not a greeting/chatter."""
+    stripped = text.strip().lower()
+    if stripped in _NON_FOOD_PHRASES:
+        return False
+    words = stripped.split()
+    if len(words) <= 3 and all(w in _NON_FOOD_PHRASES for w in words):
+        return False
+    if _NUMBER_UNIT_RE.search(text):
+        return True
+    if set(words) & _FOOD_SIGNAL_WORDS:
+        return True
+    if len(words) >= 6:
+        return True
+    return False
+
+
+def _needs_clarification(text: str) -> bool:
+    """True if the food description is too vague to estimate accurately (no quantity/cooking method)."""
+    words = text.strip().lower().split()
+    if len(words) > 3:
+        return False
+    if _NUMBER_UNIT_RE.search(text):
+        return False
+    if set(words) & _COOKING_METHODS:
+        return False
+    return bool(set(words) & _FOOD_SIGNAL_WORDS)
+
+
+def _get_clarification_question(text: str) -> str:
+    """Return a specific clarification question based on the food mentioned."""
+    words = frozenset(text.strip().lower().split())
+    for food_set, question in _CLARIFICATION_QUESTIONS.items():
+        if words & food_set:
+            return f"\U0001f373 Got it! {question}"
+    return (
+        "\U0001f37d Can you add a bit more detail?\n"
+        "Cooking method, quantity, or ingredients help a lot:\n"
+        "  e.g. *2 boiled eggs* \u00b7 *150g grilled chicken* \u00b7 *200g fried rice*"
+    )
+
+
 def estimate_calories(meal_text: str) -> dict:
     """Send meal description to Groq and return parsed JSON."""
     response = groq_client.chat.completions.create(
@@ -1011,6 +1181,7 @@ def format_reply(data: dict, today: dict, targets: dict) -> tuple[str, str]:
             f"C: {today['carbs_g']}/{tc_target}g {c_bar}"
         )
 
+    lines.append("\n<i>\u2705 high confidence \u00b7 \U0001f7e1 estimated \u00b7 \u26a0\ufe0f uncertain</i>")
     return "\n".join(lines), "HTML"
 
 
@@ -1019,70 +1190,70 @@ def format_reply(data: dict, today: dict, targets: dict) -> tuple[str, str]:
 # ---------------------------------------------------------------------------
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    name = update.effective_user.first_name or "there"
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("\U0001f4d6 Quick Start Guide", callback_data="help_quickstart"),
+    ]])
     await update.message.reply_text(
-        "Hi! Send me a description of what you ate and I'll estimate the calories "
-        "and macros.\n\n"
-        "Set up your profile first for personalized targets:\n"
-        "  /profile 180 75 28 male\n\n"
-        "Or just start logging meals. Type /help to see all commands."
+        f"\U0001f44b Hi {_html(name)}! I track your calories and macros.\n\n"
+        "1\ufe0f\u20e3 <b>Set your profile</b> for personalized targets:\n"
+        "   <code>/profile 180 75 28 male moderate</code>\n\n"
+        "2\ufe0f\u20e3 <b>Log a meal</b> \u2014 just type what you ate:\n"
+        "   <code>2 eggs, toast with butter</code>\n\n"
+        "3\ufe0f\u20e3 <b>Check your day:</b> /today\n\n"
+        "Or send a \U0001f4f7 photo of your meal anytime!",
+        parse_mode="HTML",
+        reply_markup=keyboard,
     )
+
+
+async def help_quickstart_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show quick-start guide when user taps button in /start."""
+    query = update.callback_query
+    await query.answer()
+    await query.message.reply_text(_HELP_QUICK_START, parse_mode="HTML")
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(
-        "\U0001f37d HOW TO USE\n\n"
-        "Just type what you ate and I'll estimate calories & macros:\n"
-        "  chicken salad with rice\n"
-        "  2 eggs, toast with butter, black coffee\n"
-        "  big mac, medium fries, diet coke\n\n"
-        "\U0001f4f7 You can also send a PHOTO of your meal!\n"
-        "Add a caption for better accuracy (e.g. 'about 200g of pasta').\n\n"
-        "\U0001f464 PROFILE & TARGETS\n\n"
-        "/profile <height_cm> <weight_kg> <age> <gender> <activity> [body_fat%]\n"
-        "  Calculates TDEE using Mifflin-St Jeor + Harris-Benedict (averaged)\n"
-        "  Add body fat % for Katch-McArdle formula (most accurate)\n"
-        "  example: /profile 180 75 28 male moderate\n"
-        "  example: /profile 180 75 28 male moderate 18\n"
-        "  Activity: sedentary, light, moderate, active, very_active\n\n"
-        "/myprofile - show your profile and daily targets\n\n"
-        "/macros - show today's macro progress (P/F/C)\n\n"
-        "\U0001f4ca CALORIE TRACKING\n\n"
-        "/today - show all meals logged today with totals\n"
-        "/week - 7-day calorie and macro summary\n"
-        "/history [YYYY-MM-DD] - view meals for a past date (default: yesterday)\n"
-        "/delmeal <id> - delete a specific logged meal by ID\n"
-        "/stats - logging streaks and 30-day statistics\n"
-        "/setlimit <kcal> - override daily calorie limit\n"
-        "  (macros scale proportionally)\n"
-        "  example: /setlimit 2200\n"
-        "/limit - check your current daily limit\n\n"
-        "\U0001f4a7 WATER TRACKING\n\n"
-        "/water <ml> - log water (e.g. /water 500)\n"
-        "/watertoday - show today's water intake\n"
-        "  Target is weight-based (~35ml/kg) if profile is set\n"
-        "/reminders on|off - toggle water reminders\n"
-        "  Schedule: 11:00, 14:00, 16:00, 18:00, 20:00 UTC\n"
-        "/weight <kg> - update your weight (e.g. /weight 74.5)\n"
-        "/weight - show weight history\n\n"
-        "\U0001f957 DIET PLANNING\n\n"
-        "/goal <lose_weight|maintain|gain_muscle>\n"
-        "  example: /goal lose_weight\n\n"
-        "/schedule <meal time>, <meal time>, ...\n"
-        "  example: /schedule breakfast 8:00, lunch 13:00, dinner 19:00\n\n"
-        "/exclude <food1>, <food2>, ...\n"
-        "  example: /exclude pork, shellfish, peanuts\n"
-        "  /exclude clear - remove all exclusions\n\n"
-        "/budget <amount> <currency>\n"
-        "  example: /budget 80 EUR\n\n"
-        "/mealplan - generate 7-day meal plan with shopping list\n"
-        "/shoplist - re-show last shopping list\n"
-        "/diet - show your current diet preferences\n\n"
-        "\U0001f504 RESET DATA\n\n"
-        "/reset meals - clear today's meals\n"
-        "/reset water - clear today's water\n"
-        "/reset all - delete ALL your data\n"
-        "  Only affects your own data."
-    )
+    full = bool(context.args and context.args[0].lower() in ("full", "all"))
+    await update.message.reply_text(_HELP_QUICK_START, parse_mode="HTML")
+
+    if full:
+        full_ref = (
+            "\U0001f4d6 <b>Full Command Reference</b>\n\n"
+            "<b>Profile &amp; Targets</b>\n"
+            "/profile &lt;h&gt; &lt;w&gt; &lt;age&gt; &lt;gender&gt; &lt;activity&gt; [body_fat%]\n"
+            "  TDEE via Mifflin-St Jeor + Harris-Benedict (avg); add body fat % for Katch-McArdle\n"
+            "  e.g. <code>/profile 180 75 28 male moderate</code>\n"
+            "  Activity: sedentary \u00b7 light \u00b7 moderate \u00b7 active \u00b7 very_active\n"
+            "/myprofile \u2014 show profile and active targets\n"
+            "/macros \u2014 today\u2019s macro breakdown with progress bars\n\n"
+            "<b>Calorie Tracking</b>\n"
+            "/today \u2014 meals logged today with inline delete buttons\n"
+            "/week \u2014 7-day summary\n"
+            "/history [YYYY-MM-DD] \u2014 meals for a date (default: today)\n"
+            "/delmeal &lt;id&gt; \u2014 delete a meal by ID\n"
+            "/stats \u2014 logging streaks and 30-day statistics\n"
+            "/setlimit &lt;kcal&gt; \u2014 override daily limit (macros scale proportionally)\n"
+            "/limit \u2014 show current limit\n\n"
+            "<b>Water Tracking</b>\n"
+            "/water &lt;ml&gt; \u2014 log water (e.g. /water 500)\n"
+            "/watertoday \u2014 today\u2019s intake vs target (~35 ml/kg from profile, else 2000 ml)\n"
+            "/reminders on|off \u2014 daily water reminders (11:00, 14:00, 16:00, 18:00, 20:00 UTC)\n"
+            "/weight &lt;kg&gt; \u2014 update weight \u00b7 /weight \u2014 view history\n\n"
+            "<b>Diet Planning</b>\n"
+            "/goal &lt;lose_weight|maintain|gain_muscle&gt;\n"
+            "/schedule breakfast 8:00, lunch 13:00, dinner 19:00\n"
+            "/exclude pork, shellfish  (or /exclude clear)\n"
+            "/budget 80 EUR\n"
+            "/mealplan \u2014 generate 7-day plan (3 messages + shopping list)\n"
+            "/shoplist \u2014 re-show last shopping list\n"
+            "/diet \u2014 show diet preferences with action hints\n\n"
+            "<b>Reset Data</b>\n"
+            "/reset meals \u00b7 /reset water \u00b7 /reset all (with confirmation)\n\n"
+            "<i>\u2705 high confidence \u00b7 \U0001f7e1 estimated \u00b7 \u26a0\ufe0f uncertain \u2014 shown on each meal reply</i>"
+        )
+        await update.message.reply_text(full_ref, parse_mode="HTML")
 
 
 async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1243,20 +1414,28 @@ async def today_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     total_c = sum(m["carbs_g"] for m in meals)
     remaining = targets["daily_limit"] - total_cal
 
-    lines = ["\U0001f4cb Today's meals:"]
+    lines = ["\U0001f4cb <b>Today's meals:</b>"]
+    keyboard_rows = []
     for m in meals:
         t = m["created_at"][11:16]
+        short = _html(_truncate(m["meal_text"]))
         lines.append(
-            f"- [#{m['id']}] [{t}] {m['meal_text'][:40]}: ~{m['calories']} kcal"
+            f"\u2022 [{t}] {short}: ~{m['calories']} kcal"
             f" (P:{m['protein_g']}g F:{m['fat_g']}g C:{m['carbs_g']}g)"
         )
+        keyboard_rows.append([
+            InlineKeyboardButton(
+                f"\U0001f5d1 Delete: {_truncate(m['meal_text'], 25)}",
+                callback_data=f"delmeal_inline:{m['id']}:{user_id}",
+            )
+        ])
 
-    lines.append(f"\nTotal: {total_cal} kcal | P: {total_p}g | F: {total_f}g | C: {total_c}g")
+    lines.append(f"\n<b>Total:</b> {total_cal} kcal | P: {total_p}g | F: {total_f}g | C: {total_c}g")
     if remaining >= 0:
         lines.append(f"\U0001f4ca {total_cal} / {targets['daily_limit']} kcal ({remaining} remaining)")
     else:
         lines.append(
-            f"\u26a0\ufe0f Over limit! {total_cal} / {targets['daily_limit']} kcal"
+            f"\u26a0\ufe0f <b>Over limit!</b> {total_cal} / {targets['daily_limit']} kcal"
             f" (+{abs(remaining)} over)"
         )
 
@@ -1266,8 +1445,11 @@ async def today_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             f" | F: {total_f}/{targets['daily_fat_g']}g"
             f" | C: {total_c}/{targets['daily_carbs_g']}g"
         )
-    lines.append("\nUse /delmeal <id> to remove a specific entry.")
-    await update.message.reply_text("\n".join(lines))
+    await update.message.reply_text(
+        "\n".join(lines),
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(keyboard_rows),
+    )
 
 
 async def week_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1310,6 +1492,7 @@ async def setlimit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
 
     user_id = update.effective_user.id
+    old_cal = get_targets(user_id)["daily_limit"]
     # Scale macros proportionally based on profile recommendations
     profile = get_profile(user_id)
     if profile and profile["rec_calories"] > 0:
@@ -1319,12 +1502,14 @@ async def setlimit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
         set_targets(user_id, value, new_p, new_f, new_c)
         await update.message.reply_text(
-            f"Daily limit set to {value} kcal.\n"
+            f"Daily limit updated: {old_cal} \u2192 {value} kcal\n"
             f"Macros scaled: P: {new_p}g | F: {new_f}g | C: {new_c}g"
         )
     else:
         set_targets(user_id, value)
-        await update.message.reply_text(f"Daily calorie limit set to {value} kcal.")
+        await update.message.reply_text(
+            f"Daily calorie limit updated: {old_cal} \u2192 {value} kcal"
+        )
 
 
 async def limit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1579,56 +1764,107 @@ async def diet_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     goal_desc = GOALS.get(prefs["goal"], prefs["goal"])
-    schedule_str = ", ".join(
-        f"{s['meal']} {s['time']}" for s in prefs["schedule"]
-    ) if prefs["schedule"] else "not set"
-    excludes_str = ", ".join(prefs["excludes"]) if prefs["excludes"] else "none"
+    schedule_str = (
+        ", ".join(f"{s['meal']} {s['time']}" for s in prefs["schedule"])
+        if prefs["schedule"]
+        else "not set \u2192 /schedule breakfast 8:00, lunch 13:00, dinner 19:00"
+    )
+    excludes_str = (
+        ", ".join(prefs["excludes"]) if prefs["excludes"]
+        else "none \u2192 /exclude to add"
+    )
     budget_str = (
         f"{prefs['budget_amount']} {prefs['budget_currency']}"
-        if prefs["budget_amount"] > 0 else "not set"
+        if prefs["budget_amount"] > 0
+        else "not set \u2192 /budget 80 EUR"
+    )
+    ready = bool(prefs["schedule"] and prefs["budget_amount"] > 0)
+    plan_hint = (
+        "\n\u2705 Ready to generate a meal plan \u2014 run /mealplan" if ready
+        else "\nComplete all fields above, then run /mealplan"
     )
 
     await update.message.reply_text(
-        f"\U0001f957 Diet Preferences:\n\n"
+        f"\U0001f957 <b>Diet Preferences</b>\n\n"
         f"Goal: {prefs['goal']} ({goal_desc})\n"
         f"Schedule: {schedule_str}\n"
         f"Excluded: {excludes_str}\n"
-        f"Weekly budget: {budget_str}"
+        f"Weekly budget: {budget_str}" + plan_hint,
+        parse_mode="HTML",
     )
+
+
+def _format_day_block(day_data: dict) -> str:
+    """Format a single day's meals as an HTML text block for /mealplan output."""
+    lines = [f"\U0001f4c5 <b>{day_data['day']}</b>"]
+    for meal in day_data.get("meals", []):
+        slot = meal.get("slot", "").capitalize()
+        t = meal.get("time", "")
+        name = _html(meal.get("name", ""))
+        cal = meal.get("calories", 0)
+        p = meal.get("protein_g", 0)
+        f_val = meal.get("fat_g", 0)
+        c = meal.get("carbs_g", 0)
+        lines.append(
+            f"\n\U0001f37d <b>{slot}</b> ({t})\n{name}\n~{cal} kcal | P:{p}g | F:{f_val}g | C:{c}g"
+        )
+    dt = day_data.get("day_total", {})
+    lines.append(
+        f"\n<b>Day total:</b> {dt.get('calories', 0)} kcal"
+        f" | P:{dt.get('protein_g', 0)}g | F:{dt.get('fat_g', 0)}g | C:{dt.get('carbs_g', 0)}g"
+    )
+    return "\n".join(lines)
 
 
 async def mealplan_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Generate a 7-day meal plan."""
     user_id = update.effective_user.id
 
-    # Check prerequisites
+    # Pre-flight checklist
     profile = get_profile(user_id)
-    if not profile:
-        await update.message.reply_text(
-            "Please set your profile first:\n"
-            "/profile <height_cm> <weight_kg> <age> <gender> <activity>"
-        )
-        return
-
     prefs = get_diet_prefs(user_id)
-    missing = []
-    if not prefs or prefs["goal"] == "maintain" and not prefs["schedule"]:
-        missing.append("/goal <lose_weight|maintain|gain_muscle>")
-    if not prefs or not prefs["schedule"]:
-        missing.append("/schedule breakfast 8:00, lunch 13:00, dinner 19:00")
-    if not prefs or prefs["budget_amount"] <= 0:
-        missing.append("/budget <amount> <currency>")
-
-    if missing:
-        await update.message.reply_text(
-            "Please set these preferences first:\n" + "\n".join(missing)
-        )
-        return
-
     targets = get_targets(user_id)
-    if targets["daily_protein_g"] == 0:
+
+    checklist = []
+    all_ok = True
+
+    if profile:
+        checklist.append("\u2705 Profile set")
+    else:
+        checklist.append("\u274c Profile missing \u2192 /profile &lt;height&gt; &lt;weight&gt; &lt;age&gt; &lt;gender&gt; &lt;activity&gt;")
+        all_ok = False
+
+    if profile and targets["daily_protein_g"] > 0:
+        checklist.append(f"\u2705 Targets: {targets['daily_limit']} kcal, {targets['daily_protein_g']}g protein")
+    elif profile:
+        checklist.append("\u274c Macro targets missing \u2192 re-run /profile")
+        all_ok = False
+
+    if prefs and prefs["schedule"]:
+        slots = ", ".join(f"{s['meal']} {s['time']}" for s in prefs["schedule"])
+        checklist.append(f"\u2705 Schedule: {slots}")
+    else:
+        checklist.append("\u274c Schedule missing \u2192 /schedule breakfast 8:00, lunch 13:00, dinner 19:00")
+        all_ok = False
+
+    if prefs and prefs["budget_amount"] > 0:
+        checklist.append(f"\u2705 Budget: {prefs['budget_amount']} {prefs['budget_currency']}")
+    else:
+        checklist.append("\u274c Budget missing \u2192 /budget 80 EUR")
+        all_ok = False
+
+    if prefs:
+        goal_label = prefs["goal"]
+        checklist.append(
+            f"\u2705 Goal: {goal_label}" if goal_label != "maintain"
+            else f"\u26a0\ufe0f Goal: maintain (change with /goal if needed)"
+        )
+
+    if not all_ok:
         await update.message.reply_text(
-            "Your macro targets are not set. Run /profile to get personalized recommendations."
+            "\U0001f4cb <b>Meal Plan Requirements</b>\n\n" + "\n".join(checklist)
+            + "\n\nFix the items above, then run /mealplan again.",
+            parse_mode="HTML",
         )
         return
 
@@ -1654,64 +1890,55 @@ async def mealplan_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             json.dumps(plan), json.dumps(shoplist),
         )
 
-        # Warn user if any days deviate >10% from calorie target
+        # Warn user if any days deviate >5% from calorie target (matches MEALPLAN_PROMPT rule)
         cal_target = targets["daily_limit"]
         bad_days = [
             d.get("day", "?")
             for d in plan.get("days", [])
-            if not (cal_target * 0.90 <= d.get("day_total", {}).get("calories", 0) <= cal_target * 1.10)
+            if not (cal_target * 0.95 <= d.get("day_total", {}).get("calories", 0) <= cal_target * 1.05)
         ]
         if bad_days:
             await update.message.reply_text(
-                f"Note: {', '.join(bad_days)} may not hit your calorie target precisely. "
-                "The plan is still valid — adjust portions slightly if needed."
+                f"\u26a0\ufe0f {', '.join(bad_days)} deviate more than 5% from your "
+                f"{cal_target} kcal target. Adjust portions slightly if needed."
             )
 
-        # Send day-by-day messages
-        for day_data in plan.get("days", []):
-            lines = [f"\U0001f4c5 {day_data['day']}"]
-            for meal in day_data.get("meals", []):
-                slot = meal.get("slot", "")
-                t = meal.get("time", "")
-                lines.append(
-                    f"\n\U0001f37d {slot.capitalize()} ({t})\n"
-                    f"{meal.get('name', '')}\n"
-                    f"~{meal.get('calories', 0)} kcal | "
-                    f"P: {meal.get('protein_g', 0)}g | "
-                    f"F: {meal.get('fat_g', 0)}g | "
-                    f"C: {meal.get('carbs_g', 0)}g"
-                )
-            dt = day_data.get("day_total", {})
-            lines.append(
-                f"\nDay total: {dt.get('calories', 0)} kcal | "
-                f"P: {dt.get('protein_g', 0)}g | "
-                f"F: {dt.get('fat_g', 0)}g | "
-                f"C: {dt.get('carbs_g', 0)}g"
-            )
-            await update.message.reply_text("\n".join(lines))
+        # Send plan as 3 messages: Mon-Wed, Thu-Sun, Shopping list
+        all_days = plan.get("days", [])
+        sep = "\n\n" + "\u2500" * 20 + "\n\n"
 
-        # Send shopping list
+        if all_days[:3]:
+            await update.message.reply_text(
+                sep.join(_format_day_block(d) for d in all_days[:3]),
+                parse_mode="HTML",
+            )
+        if all_days[3:]:
+            await update.message.reply_text(
+                sep.join(_format_day_block(d) for d in all_days[3:]),
+                parse_mode="HTML",
+            )
+
+        # Shopping list message
         currency = plan.get("currency", prefs["budget_currency"])
         total_cost = plan.get("total_cost", 0)
         budget = prefs["budget_amount"]
         diff = budget - total_cost
 
         shop_lines = [
-            f"\U0001f6d2 Weekly Shopping List "
-            f"(Budget: {budget} {currency})\n"
+            f"\U0001f6d2 <b>Weekly Shopping List</b> (Budget: {budget} {currency})\n"
         ]
         for item in shoplist:
             shop_lines.append(
-                f"- {item.get('item', '')} {item.get('quantity', '')}: "
+                f"\u2022 {_html(item.get('item', ''))} {_html(item.get('quantity', ''))}: "
                 f"~{item.get('estimated_cost', 0)} {currency}"
             )
-        shop_lines.append(f"\nEstimated total: ~{total_cost} {currency}")
+        shop_lines.append(f"\n<b>Estimated total:</b> ~{total_cost} {currency}")
         if diff >= 0:
-            shop_lines.append(f"({diff:.0f} {currency} under budget)")
+            shop_lines.append(f"(\u2705 {diff:.0f} {currency} under budget)")
         else:
-            shop_lines.append(f"\u26a0\ufe0f ({abs(diff):.0f} {currency} over budget)")
+            shop_lines.append(f"(\u26a0\ufe0f {abs(diff):.0f} {currency} over budget)")
 
-        await update.message.reply_text("\n".join(shop_lines))
+        await update.message.reply_text("\n".join(shop_lines), parse_mode="HTML")
 
     except json.JSONDecodeError:
         logger.exception("Failed to parse meal plan JSON")
@@ -1793,7 +2020,7 @@ async def delmeal_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     deleted = delete_meal_by_id(meal_id, user_id)
     if deleted:
         await update.message.reply_text(
-            f"\u2705 Deleted meal #{meal_id}: {meal['meal_text'][:50]} (~{meal['calories']} kcal)"
+            f"\u2705 Deleted meal #{meal_id}: {_truncate(meal['meal_text'], 50)} (~{meal['calories']} kcal)"
         )
     else:
         await update.message.reply_text(f"Could not delete meal #{meal_id}. Please try again.")
@@ -1812,7 +2039,7 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             )
             return
     else:
-        date_str = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
+        date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
     meals = get_meals_for_date(user_id, date_str)
     if not meals:
@@ -1830,7 +2057,7 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     for m in meals:
         t = m["created_at"][11:16]
         lines.append(
-            f"- [#{m['id']}] [{t}] {m['meal_text'][:40]}: ~{m['calories']} kcal"
+            f"- [#{m['id']}] [{t}] {_truncate(m['meal_text'])}: ~{m['calories']} kcal"
             f" (P:{m['protein_g']}g F:{m['fat_g']}g C:{m['carbs_g']}g)"
         )
     lines.append(f"\nTotal: {total_cal} kcal | P: {total_p}g | F: {total_f}g | C: {total_c}g")
@@ -1936,6 +2163,48 @@ async def weight_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     )
 
 
+async def delmeal_inline_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle inline 'Delete' button tapped from /today output."""
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    try:
+        _, meal_id_str, owner_id_str = query.data.split(":")
+        meal_id, owner_id = int(meal_id_str), int(owner_id_str)
+    except (ValueError, AttributeError):
+        await query.answer("Invalid request.", show_alert=True)
+        return
+    if owner_id != user_id:
+        await query.answer("This button isn't for you.", show_alert=True)
+        return
+    meal = get_meal_by_id(meal_id, user_id)
+    if not meal:
+        await query.answer(f"Meal #{meal_id} not found (already deleted?).", show_alert=True)
+        return
+    deleted = delete_meal_by_id(meal_id, user_id)
+    if deleted:
+        short_text = _truncate(meal["meal_text"], 30)
+        await query.answer(f"Deleted: {short_text}")
+        try:
+            new_keyboard = [
+                row for row in query.message.reply_markup.inline_keyboard
+                if not any(
+                    f"delmeal_inline:{meal_id}:" in (btn.callback_data or "")
+                    for btn in row
+                )
+            ]
+            original = query.message.text or ""
+            await query.edit_message_text(
+                text=original + f"\n\n\u2705 Deleted: {_html(short_text)}",
+                reply_markup=InlineKeyboardMarkup(new_keyboard) if new_keyboard else None,
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass  # Toast already shown; graceful degradation if message edit fails
+    else:
+        await query.answer(f"Could not delete meal #{meal_id}.", show_alert=True)
+
+
 async def reset_all_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
@@ -1964,6 +2233,30 @@ async def handle_meal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     """Handle any text message as a meal description."""
     meal_text = update.message.text
     if not meal_text:
+        return
+
+    # --- Intent guard: ignore non-food chatter ---
+    if not _looks_like_food(meal_text):
+        await update.message.reply_text(
+            "I track food and calories. Send me a meal description like:\n"
+            "  chicken salad with rice\n"
+            "  2 eggs, toast\n\n"
+            "Type /help to see all commands."
+        )
+        return
+
+    # --- Clarification flow ---
+    if "pending_meal" in context.user_data:
+        # User answered our clarification question — combine and process
+        original = context.user_data.pop("pending_meal")
+        meal_text = f"{original} ({meal_text})"
+    elif _needs_clarification(meal_text):
+        # Too vague — ask for more detail before calling AI
+        context.user_data["pending_meal"] = meal_text
+        await update.message.reply_text(
+            _get_clarification_question(meal_text),
+            parse_mode="Markdown",
+        )
         return
 
     user = update.effective_user
@@ -2108,6 +2401,8 @@ def main() -> None:
     # Reset command + inline keyboard callback
     app.add_handler(CommandHandler("reset", reset_command))
     app.add_handler(CallbackQueryHandler(reset_all_callback, pattern=r"^(confirm|cancel)_reset_all:\d+$"))
+    app.add_handler(CallbackQueryHandler(delmeal_inline_callback, pattern=r"^delmeal_inline:\d+:\d+$"))
+    app.add_handler(CallbackQueryHandler(help_quickstart_callback, pattern=r"^help_quickstart$"))
 
     # Diet planning commands
     app.add_handler(CommandHandler("goal", goal_command))
