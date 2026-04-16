@@ -49,6 +49,8 @@ Send any meal description to the bot (DM or group chat), or send a photo of your
 You can also send a **photo** of your meal. Add a caption for better accuracy
 (e.g. "about 200g of pasta with sauce").
 
+If your description is vague (e.g. just "egg"), the bot will ask for more detail before estimating — cooking method, quantity, preparation.
+
 The bot replies with calories, macros, fiber, confidence indicator, per-100g values, and daily progress with visual progress bars (HTML-formatted):
 
 ```
@@ -78,9 +80,9 @@ Total: ~360 kcal | P: 16g | F: 23g | C: 23g
 - `/weight` - Show weight history
 
 ### Calories
-- `/today` - Show today's meals and calorie total (includes meal IDs for `/delmeal`)
+- `/today` - Show today's meals with inline delete buttons (tap to remove a meal)
 - `/week` - 7-day calorie summary
-- `/history [YYYY-MM-DD]` - View meals for a past date (defaults to yesterday)
+- `/history [YYYY-MM-DD]` - View meals for a date (defaults to today)
 - `/delmeal <id>` - Delete a specific logged meal by ID
 - `/stats` - Logging streaks and 30-day statistics
 - `/setlimit <kcal>` - Override daily calorie limit (macros scale proportionally)
