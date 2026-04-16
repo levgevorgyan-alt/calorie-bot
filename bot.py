@@ -75,8 +75,12 @@ SYSTEM_PROMPT = (
     "brand's published nutritional data (Big Mac = 550 kcal, medium fries = 320 kcal).\n"
     "- If no weight is specified, assume a realistic portion and state it in 'portion'.\n\n"
     "COOKING METHOD ADJUSTMENTS:\n"
-    "- Fried: add 10-20% calories vs boiled/grilled due to oil absorption.\n"
-    "- Boiled/steamed: no fat addition. Grilled: minimal fat. Raw: use raw reference.\n\n"
+    "- Air fryer / air-fried: treat like baked — minimal fat addition (0-5%), very similar to grilled.\n"
+    "- Pan-fried / stir-fried in oil: add 20-30% calories vs baked due to oil absorption.\n"
+    "- Deep-fried / battered / fried in oil: add 35-50% calories vs baked — maximum oil absorption.\n"
+    "- Boiled / steamed / poached: no fat addition.\n"
+    "- Grilled / broiled / BBQ: minimal fat addition (5%).\n"
+    "- Raw: use raw reference values.\n\n"
     "JSON schema (return ONLY this, no markdown fences):\n"
     '{"items": [{"name": "<food>", "portion": "<weight or description>", '
     '"calories": <int>, "protein_g": <int>, "fat_g": <int>, "carbs_g": <int>, '
@@ -147,6 +151,326 @@ _GOAL_LABELS = {
     "maintain":    "\u2696\ufe0f Maintain",
     "gain_muscle": "\U0001f4aa Gain Muscle",
 }
+
+# ---------------------------------------------------------------------------
+# Multi-language support
+# ---------------------------------------------------------------------------
+
+SUPPORTED_LANGUAGES = {"en", "ru", "hy"}
+DEFAULT_LANGUAGE = "en"
+
+TRANSLATIONS: dict = {
+    "en": {
+        "start_msg": (
+            "\U0001f44b Hi {name}! I track your calories and macros.\n\n"
+            "1\ufe0f\u20e3 <b>Set your profile</b> for personalized targets:\n"
+            "   <code>/profile 180 75 28 male moderate</code>\n\n"
+            "2\ufe0f\u20e3 <b>Log a meal</b> \u2014 just type what you ate:\n"
+            "   <code>2 eggs, toast with butter</code>\n\n"
+            "3\ufe0f\u20e3 <b>Check your day:</b> /today\n\n"
+            "Or send a \U0001f4f7 photo of your meal anytime!"
+        ),
+        "btn_quickstart": "\U0001f4d6 Quick Start Guide",
+        "estimate_header": "\U0001f37d <b>Calorie Estimate</b>",
+        "meal_total": "<b>Meal total:</b> ~{total} kcal | P: {p}g | F: {f}g | C: {c}g | Fiber: {fib}g",
+        "today_progress": "\n\U0001f4ca <b>Today:</b> {cal} / {limit} kcal\n{bar} ({remaining} remaining)",
+        "over_limit": "\n\u26a0\ufe0f <b>Over limit!</b> {cal} / {limit} kcal\n{bar} (+{over} over)",
+        "confidence_legend": "\n<i>\u2705 high confidence \u00b7 \U0001f7e1 estimated \u00b7 \u26a0\ufe0f uncertain</i>",
+        "today_header": "\U0001f4cb <b>Today's meals:</b>",
+        "today_empty": "No meals logged today. Just type what you ate!",
+        "today_total": "\n<b>Total:</b> {cal} kcal | P: {p}g | F: {f}g | C: {c}g",
+        "today_remaining": "\U0001f4ca {cal} / {limit} kcal ({remaining} remaining)",
+        "today_over": "\u26a0\ufe0f <b>Over limit!</b> {cal} / {limit} kcal (+{over} over)",
+        "btn_delete": "\U0001f5d1 Delete: {name}",
+        "water_status_remaining": "\U0001f4a7 Today: {total} / {target}ml ({remaining}ml remaining)",
+        "water_status_done": "\u2705 Today: {total} / {target}ml \u2014 target reached!",
+        "water_logged": "\U0001f4a7 Logged {amount}ml.\n{status}",
+        "water_quick_header": "\U0001f4a7 Quick water log\n{status}",
+        "water_quick_logged": "\u2705 Logged {amount}ml!\n{status}",
+        "btn_water": "\U0001f4a7 {ml}ml",
+        "water_invalid_number": "Please provide a number. Example: /water 500",
+        "water_invalid_range": "Amount must be between 1 and 5000 ml.",
+        "reminders_status": "\U0001f4a7 Water reminders are currently <b>{status}</b> for this chat.\n\nSchedule:\n{schedule}",
+        "reminders_on": "ON \u2705",
+        "reminders_off": "OFF",
+        "reminders_enabled": "\U0001f4a7 Water reminders enabled for this chat!\n\nSchedule:\n{schedule}",
+        "reminders_disabled": "Water reminders disabled for this chat.",
+        "btn_turn_on": "Turn On",
+        "btn_turn_off": "Turn Off",
+        "reset_choose": "What would you like to reset?",
+        "reset_meals_done": "\u2705 Today's meal logs cleared.",
+        "reset_water_done": "\u2705 Today's water logs cleared.",
+        "reset_all_confirm": (
+            "Are you sure? This will permanently delete ALL your data:\n"
+            "meals, water, profile, diet preferences, calorie limits, and weight history.\n\n"
+            "This cannot be undone."
+        ),
+        "reset_all_done": "\u2705 All your data has been permanently deleted.",
+        "reset_cancelled": "Reset cancelled. Your data is safe.",
+        "btn_reset_meals": "\U0001f5d1 Today's Meals",
+        "btn_reset_water": "\U0001f5d1 Today's Water",
+        "btn_reset_all": "\u26a0\ufe0f Everything",
+        "btn_yes_delete": "Yes, delete everything",
+        "btn_cancel": "Cancel",
+        "goal_current": "\U0001f3af Current goal: <b>{goal}</b> ({desc})\nSelect a new goal:",
+        "goal_updated": "\u2705 Goal updated: <b>{goal}</b> ({desc})\nSelect a new goal:",
+        "week_header": "\U0001f4c5 Weekly Summary:",
+        "week_empty": "No data for the past 7 days.",
+        "week_over": "+{diff} over",
+        "week_under": "{diff} under",
+        "week_total": "Week total: {total} kcal",
+        "week_avg_macros": "Daily avg macros: P: {p}g | F: {f}g | C: {c}g",
+        "setlimit_updated_macros": "Daily limit updated: {old} \u2192 {new} kcal\nMacros scaled: P: {p}g | F: {f}g | C: {c}g",
+        "setlimit_updated": "Daily calorie limit updated: {old} \u2192 {new} kcal",
+        "history_empty": "No meals logged for {date}.",
+        "history_header": "\U0001f4cb Meals for {date}:",
+        "stats_header": "\U0001f4ca Your Stats (last 30 days):\n",
+        "stats_empty": "No meal data yet. Start logging meals to see your stats!",
+        "weight_updated": "\u2705 Weight updated to {weight} kg.\n\nNew water target: {water_target} ml/day\nRun /profile to recalculate calorie & macro recommendations.",
+        "export_preparing": "\u23f3 Preparing your export for the last {days} days...",
+        "export_empty": "No data found for the last {days} days. Start logging meals and water!",
+        "export_meals_caption": "Meals log \u2014 last {days} days ({n} entries)",
+        "export_water_caption": "Water log \u2014 last {days} days ({n} entries)",
+        "timezone_set": "\u2705 Timezone set to <b>{tz}</b> ({offset}).\nReminder times will now display in your local time.",
+        "timezone_not_set": "not set (using UTC)",
+        "btn_share_location": "\U0001f4cd Share my location",
+        "location_set": "\u2705 Timezone detected: <b>{tz}</b> ({offset}).\nReminder times will now display in your local time.\nUse /reminders to see the updated schedule.",
+        "location_no_tz": "Could not detect timezone from this location.\nSet manually: /timezone Europe/Berlin",
+        "location_no_profile": "Please set your profile first with /profile, then share your location.",
+        "meal_parse_error": "Sorry, I couldn't parse the calorie data. Try rephrasing your meal.",
+        "meal_error": "Something went wrong. Please try again in a moment.",
+        "photo_parse_error": "Sorry, I couldn't identify the food in this photo. Try adding a caption describing the meal.",
+        "photo_error": "Something went wrong analyzing the photo. Please try again.",
+        "not_food": "I track food and calories. Send me a meal description like:\n  chicken salad with rice\n  2 eggs, toast\n\nType /help to see all commands.",
+        "clarify_fallback": "\U0001f37d Can you add a bit more detail?\nCooking method, quantity, or ingredients help a lot:\n  e.g. *2 boiled eggs* \u00b7 *150g grilled chicken* \u00b7 *200g fried rice*",
+        "language_set_en": "\u2705 Language set to <b>English</b>.",
+        "language_set_ru": "\u2705 Language set to <b>Russian</b>.",
+        "language_set_hy": "\u2705 Language set to <b>Armenian</b>.",
+        "language_choose": "Choose your language:",
+        "btn_lang_en": "\U0001f1ec\U0001f1e7 English",
+        "btn_lang_ru": "\U0001f1f7\U0001f1fa \u0420\u0443\u0441\u0441\u043a\u0438\u0439",
+        "btn_lang_hy": "\U0001f1e6\U0001f1f2 \u540d\u56fd",
+        "mealplan_generating": "\u2699\ufe0f Generating your 7-day meal plan...\nThis takes ~10 seconds (3 parallel AI calls + shopping list). Please wait.",
+        "mealplan_error_json": "Sorry, I couldn't generate a valid meal plan. Please try again.",
+        "mealplan_error": "Something went wrong generating the meal plan. Please try again.",
+        "delmeal_not_found": "Meal #{id} not found (or it doesn't belong to you).",
+        "delmeal_done": "\u2705 Deleted meal #{id}: {name} (~{cal} kcal)",
+        "delmeal_cb_not_found": "Meal #{id} not found (already deleted?).",
+        "delmeal_cb_deleted_toast": "Deleted: {name}",
+        "delmeal_cb_deleted_edit": "\u2705 Deleted: {name}",
+        "btn_invalid": "Invalid request.",
+        "btn_not_yours": "This button isn't for you.",
+        "reminder_msg": "\U0001f4a7 Water Reminder!\nTime to drink ~{amount}ml of water.\nUse /water {amount} to log it.",
+    },
+    "ru": {
+        "start_msg": (
+            "\U0001f44b \u041f\u0440\u0438\u0432\u0435\u0442, {name}! \u042f \u0441\u043b\u0435\u0436\u0443 \u0437\u0430 \u043a\u0430\u043b\u043e\u0440\u0438\u044f\u043c\u0438 \u0438 \u043c\u0430\u043a\u0440\u043e\u0441\u0430\u043c\u0438.\n\n"
+            "1\ufe0f\u20e3 <b>\u041d\u0430\u0441\u0442\u0440\u043e\u0439\u0442\u0435 \u043f\u0440\u043e\u0444\u0438\u043b\u044c</b> \u0434\u043b\u044f \u043f\u0435\u0440\u0441\u043e\u043d\u0430\u043b\u044c\u043d\u044b\u0445 \u0446\u0435\u043b\u0435\u0439:\n"
+            "   <code>/profile 180 75 28 male moderate</code>\n\n"
+            "2\ufe0f\u20e3 <b>\u0417\u0430\u043f\u0438\u0441\u044b\u0432\u0430\u0439\u0442\u0435 \u043f\u0440\u0438\u0451\u043c\u044b \u043f\u0438\u0449\u0438</b> \u2014 \u043f\u0440\u043e\u0441\u0442\u043e \u043d\u0430\u043f\u0438\u0448\u0438\u0442\u0435 \u0447\u0442\u043e \u0435\u043b\u0438:\n"
+            "   <code>2 \u044f\u0439\u0446\u0430, \u0442\u043e\u0441\u0442 \u0441 \u043c\u0430\u0441\u043b\u043e\u043c</code>\n\n"
+            "3\ufe0f\u20e3 <b>\u041f\u0440\u043e\u0432\u0435\u0440\u044f\u0439\u0442\u0435 \u0434\u0435\u043d\u044c:</b> /today\n\n"
+            "\u0418\u043b\u0438 \u043e\u0442\u043f\u0440\u0430\u0432\u044c\u0442\u0435 \U0001f4f7 \u0444\u043e\u0442\u043e \u0435\u0434\u044b \u0432 \u043b\u044e\u0431\u043e\u0435 \u0432\u0440\u0435\u043c\u044f!"
+        ),
+        "btn_quickstart": "\U0001f4d6 \u0411\u044b\u0441\u0442\u0440\u044b\u0439 \u0441\u0442\u0430\u0440\u0442",
+        "estimate_header": "\U0001f37d <b>\u041e\u0446\u0435\u043d\u043a\u0430 \u043a\u0430\u043b\u043e\u0440\u0438\u0439</b>",
+        "meal_total": "<b>\u0418\u0442\u043e\u0433\u043e:</b> ~{total} \u043a\u043a\u0430\u043b | \u0411: {p}\u0433 | \u0416: {f}\u0433 | \u0423: {c}\u0433 | \u041a\u043b\u0435\u0442\u0447\u0430\u0442\u043a\u0430: {fib}\u0433",
+        "today_progress": "\n\U0001f4ca <b>\u0421\u0435\u0433\u043e\u0434\u043d\u044f:</b> {cal} / {limit} \u043a\u043a\u0430\u043b\n{bar} (\u043e\u0441\u0442\u0430\u043b\u043e\u0441\u044c {remaining})",
+        "over_limit": "\n\u26a0\ufe0f <b>\u041f\u0440\u0435\u0432\u044b\u0448\u0435\u043d \u043b\u0438\u043c\u0438\u0442!</b> {cal} / {limit} \u043a\u043a\u0430\u043b\n{bar} (+{over} \u0441\u0432\u0435\u0440\u0445)",
+        "confidence_legend": "\n<i>\u2705 \u0432\u044b\u0441\u043e\u043a\u0430\u044f \u0442\u043e\u0447\u043d\u043e\u0441\u0442\u044c \u00b7 \U0001f7e1 \u043e\u0446\u0435\u043d\u043a\u0430 \u00b7 \u26a0\ufe0f \u043d\u0435\u0442\u043e\u0447\u043d\u043e</i>",
+        "today_header": "\U0001f4cb <b>\u0421\u0435\u0433\u043e\u0434\u043d\u044f\u0448\u043d\u0438\u0435 \u043f\u0440\u0438\u0451\u043c\u044b \u043f\u0438\u0449\u0438:</b>",
+        "today_empty": "\u0421\u0435\u0433\u043e\u0434\u043d\u044f \u0435\u0449\u0451 \u043d\u0438\u0447\u0435\u0433\u043e \u043d\u0435 \u0437\u0430\u043f\u0438\u0441\u0430\u043d\u043e. \u041f\u0440\u043e\u0441\u0442\u043e \u043d\u0430\u043f\u0438\u0448\u0438\u0442\u0435 \u0447\u0442\u043e \u0435\u043b\u0438!",
+        "today_total": "\n<b>\u0418\u0442\u043e\u0433\u043e:</b> {cal} \u043a\u043a\u0430\u043b | \u0411: {p}\u0433 | \u0416: {f}\u0433 | \u0423: {c}\u0433",
+        "today_remaining": "\U0001f4ca {cal} / {limit} \u043a\u043a\u0430\u043b (\u043e\u0441\u0442\u0430\u043b\u043e\u0441\u044c {remaining})",
+        "today_over": "\u26a0\ufe0f <b>\u041f\u0440\u0435\u0432\u044b\u0448\u0435\u043d \u043b\u0438\u043c\u0438\u0442!</b> {cal} / {limit} \u043a\u043a\u0430\u043b (+{over} \u0441\u0432\u0435\u0440\u0445)",
+        "btn_delete": "\U0001f5d1 \u0423\u0434\u0430\u043b\u0438\u0442\u044c: {name}",
+        "water_status_remaining": "\U0001f4a7 \u0421\u0435\u0433\u043e\u0434\u043d\u044f: {total} / {target}\u043c\u043b (\u043e\u0441\u0442\u0430\u043b\u043e\u0441\u044c {remaining}\u043c\u043b)",
+        "water_status_done": "\u2705 \u0421\u0435\u0433\u043e\u0434\u043d\u044f: {total} / {target}\u043c\u043b \u2014 \u043d\u043e\u0440\u043c\u0430 \u0432\u044b\u043f\u043e\u043b\u043d\u0435\u043d\u0430!",
+        "water_logged": "\U0001f4a7 \u0417\u0430\u043f\u0438\u0441\u0430\u043d\u043e {amount}\u043c\u043b.\n{status}",
+        "water_quick_header": "\U0001f4a7 \u0411\u044b\u0441\u0442\u0440\u0430\u044f \u0437\u0430\u043f\u0438\u0441\u044c \u0432\u043e\u0434\u044b\n{status}",
+        "water_quick_logged": "\u2705 \u0417\u0430\u043f\u0438\u0441\u0430\u043d\u043e {amount}\u043c\u043b!\n{status}",
+        "btn_water": "\U0001f4a7 {ml}\u043c\u043b",
+        "water_invalid_number": "\u041f\u043e\u0436\u0430\u043b\u0443\u0439\u0441\u0442\u0430, \u0443\u043a\u0430\u0436\u0438\u0442\u0435 \u0447\u0438\u0441\u043b\u043e. \u041f\u0440\u0438\u043c\u0435\u0440: /water 500",
+        "water_invalid_range": "\u041a\u043e\u043b\u0438\u0447\u0435\u0441\u0442\u0432\u043e \u0434\u043e\u043b\u0436\u043d\u043e \u0431\u044b\u0442\u044c \u043e\u0442 1 \u0434\u043e 5000 \u043c\u043b.",
+        "reminders_status": "\U0001f4a7 \u041d\u0430\u043f\u043e\u043c\u0438\u043d\u0430\u043d\u0438\u044f \u043e \u0432\u043e\u0434\u0435 \u0441\u0435\u0439\u0447\u0430\u0441 <b>{status}</b> \u0434\u043b\u044f \u044d\u0442\u043e\u0433\u043e \u0447\u0430\u0442\u0430.\n\n\u0420\u0430\u0441\u043f\u0438\u0441\u0430\u043d\u0438\u0435:\n{schedule}",
+        "reminders_on": "\u0412\u041a\u041b\u042e\u0427\u0415\u041d\u042b \u2705",
+        "reminders_off": "\u0412\u042b\u041a\u041b\u042e\u0427\u0415\u041d\u042b",
+        "reminders_enabled": "\U0001f4a7 \u041d\u0430\u043f\u043e\u043c\u0438\u043d\u0430\u043d\u0438\u044f \u043e \u0432\u043e\u0434\u0435 \u0432\u043a\u043b\u044e\u0447\u0435\u043d\u044b!\n\n\u0420\u0430\u0441\u043f\u0438\u0441\u0430\u043d\u0438\u0435:\n{schedule}",
+        "reminders_disabled": "\u041d\u0430\u043f\u043e\u043c\u0438\u043d\u0430\u043d\u0438\u044f \u043e \u0432\u043e\u0434\u0435 \u043e\u0442\u043a\u043b\u044e\u0447\u0435\u043d\u044b \u0434\u043b\u044f \u044d\u0442\u043e\u0433\u043e \u0447\u0430\u0442\u0430.",
+        "btn_turn_on": "\u0412\u043a\u043b\u044e\u0447\u0438\u0442\u044c",
+        "btn_turn_off": "\u0412\u044b\u043a\u043b\u044e\u0447\u0438\u0442\u044c",
+        "reset_choose": "\u0427\u0442\u043e \u0441\u0431\u0440\u043e\u0441\u0438\u0442\u044c?",
+        "reset_meals_done": "\u2705 \u0421\u0435\u0433\u043e\u0434\u043d\u044f\u0448\u043d\u0438\u0435 \u043f\u0440\u0438\u0451\u043c\u044b \u043f\u0438\u0449\u0438 \u0443\u0434\u0430\u043b\u0435\u043d\u044b.",
+        "reset_water_done": "\u2705 \u0421\u0435\u0433\u043e\u0434\u043d\u044f\u0448\u043d\u0438\u0435 \u0437\u0430\u043f\u0438\u0441\u0438 \u0432\u043e\u0434\u044b \u0443\u0434\u0430\u043b\u0435\u043d\u044b.",
+        "reset_all_confirm": "\u0412\u044b \u0443\u0432\u0435\u0440\u0435\u043d\u044b? \u042d\u0442\u043e \u0443\u0434\u0430\u043b\u0438\u0442 \u0412\u0421\u0415 \u0432\u0430\u0448\u0438 \u0434\u0430\u043d\u043d\u044b\u0435:\n\u0435\u0434\u0430, \u0432\u043e\u0434\u0430, \u043f\u0440\u043e\u0444\u0438\u043b\u044c, \u043f\u0440\u0435\u0434\u043f\u043e\u0447\u0442\u0435\u043d\u0438\u044f \u0434\u0438\u0435\u0442\u044b, \u043b\u0438\u043c\u0438\u0442\u044b \u043a\u0430\u043b\u043e\u0440\u0438\u0439 \u0438 \u0438\u0441\u0442\u043e\u0440\u0438\u044f \u0432\u0435\u0441\u0430.\n\n\u041e\u0442\u043c\u0435\u043d\u0438\u0442\u044c \u043d\u0435\u0432\u043e\u0437\u043c\u043e\u0436\u043d\u043e.",
+        "reset_all_done": "\u2705 \u0412\u0441\u0435 \u0432\u0430\u0448\u0438 \u0434\u0430\u043d\u043d\u044b\u0435 \u0443\u0434\u0430\u043b\u0435\u043d\u044b.",
+        "reset_cancelled": "\u0421\u0431\u0440\u043e\u0441 \u043e\u0442\u043c\u0435\u043d\u0451\u043d. \u0412\u0430\u0448\u0438 \u0434\u0430\u043d\u043d\u044b\u0435 \u0432 \u0431\u0435\u0437\u043e\u043f\u0430\u0441\u043d\u043e\u0441\u0442\u0438.",
+        "btn_reset_meals": "\U0001f5d1 \u0421\u0435\u0433\u043e\u0434\u043d\u044f\u0448\u043d\u044f\u044f \u0435\u0434\u0430",
+        "btn_reset_water": "\U0001f5d1 \u0421\u0435\u0433\u043e\u0434\u043d\u044f\u0448\u043d\u044f\u044f \u0432\u043e\u0434\u0430",
+        "btn_reset_all": "\u26a0\ufe0f \u0412\u0441\u0451",
+        "btn_yes_delete": "\u0414\u0430, \u0443\u0434\u0430\u043b\u0438\u0442\u044c \u0432\u0441\u0451",
+        "btn_cancel": "\u041e\u0442\u043c\u0435\u043d\u0430",
+        "goal_current": "\U0001f3af \u0422\u0435\u043a\u0443\u0449\u0430\u044f \u0446\u0435\u043b\u044c: <b>{goal}</b> ({desc})\n\u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u043d\u043e\u0432\u0443\u044e \u0446\u0435\u043b\u044c:",
+        "goal_updated": "\u2705 \u0426\u0435\u043b\u044c \u043e\u0431\u043d\u043e\u0432\u043b\u0435\u043d\u0430: <b>{goal}</b> ({desc})\n\u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u043d\u043e\u0432\u0443\u044e \u0446\u0435\u043b\u044c:",
+        "week_header": "\U0001f4c5 \u0421\u0432\u043e\u0434\u043a\u0430 \u0437\u0430 \u043d\u0435\u0434\u0435\u043b\u044e:",
+        "week_empty": "\u041d\u0435\u0442 \u0434\u0430\u043d\u043d\u044b\u0445 \u0437\u0430 \u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0435 7 \u0434\u043d\u0435\u0439.",
+        "week_over": "+{diff} \u0441\u0432\u0435\u0440\u0445",
+        "week_under": "{diff} \u043d\u0438\u0436\u0435",
+        "week_total": "\u0418\u0442\u043e\u0433\u043e \u0437\u0430 \u043d\u0435\u0434\u0435\u043b\u044e: {total} \u043a\u043a\u0430\u043b",
+        "week_avg_macros": "\u0421\u0440\u0435\u0434\u043d\u0438\u0435 \u043c\u0430\u043a\u0440\u043e\u0441\u044b/\u0434\u0435\u043d\u044c: \u0411: {p}\u0433 | \u0416: {f}\u0433 | \u0423: {c}\u0433",
+        "setlimit_updated_macros": "\u041b\u0438\u043c\u0438\u0442 \u043e\u0431\u043d\u043e\u0432\u043b\u0451\u043d: {old} \u2192 {new} \u043a\u043a\u0430\u043b\n\u041c\u0430\u043a\u0440\u043e\u0441\u044b: \u0411: {p}\u0433 | \u0416: {f}\u0433 | \u0423: {c}\u0433",
+        "setlimit_updated": "\u041b\u0438\u043c\u0438\u0442 \u043a\u0430\u043b\u043e\u0440\u0438\u0439 \u043e\u0431\u043d\u043e\u0432\u043b\u0451\u043d: {old} \u2192 {new} \u043a\u043a\u0430\u043b",
+        "history_empty": "\u0417\u0430 {date} \u0437\u0430\u043f\u0438\u0441\u0435\u0439 \u043d\u0435\u0442.",
+        "history_header": "\U0001f4cb \u041f\u0440\u0438\u0451\u043c\u044b \u043f\u0438\u0449\u0438 \u0437\u0430 {date}:",
+        "stats_header": "\U0001f4ca \u0412\u0430\u0448\u0430 \u0441\u0442\u0430\u0442\u0438\u0441\u0442\u0438\u043a\u0430 (\u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0435 30 \u0434\u043d\u0435\u0439):\n",
+        "stats_empty": "\u0414\u0430\u043d\u043d\u044b\u0445 \u043f\u043e\u043a\u0430 \u043d\u0435\u0442. \u041d\u0430\u0447\u043d\u0438\u0442\u0435 \u0437\u0430\u043f\u0438\u0441\u044b\u0432\u0430\u0442\u044c \u043f\u0440\u0438\u0451\u043c\u044b \u043f\u0438\u0449\u0438!",
+        "weight_updated": "\u2705 \u0412\u0435\u0441 \u043e\u0431\u043d\u043e\u0432\u043b\u0451\u043d: {weight} \u043a\u0433.\n\n\u041d\u043e\u0432\u0430\u044f \u043d\u043e\u0440\u043c\u0430 \u0432\u043e\u0434\u044b: {water_target} \u043c\u043b/\u0434\u0435\u043d\u044c\n\u0417\u0430\u043f\u0443\u0441\u0442\u0438\u0442\u0435 /profile \u0434\u043b\u044f \u043f\u0435\u0440\u0435\u0441\u0447\u0451\u0442\u0430.",
+        "export_preparing": "\u23f3 \u041f\u043e\u0434\u0433\u043e\u0442\u043e\u0432\u043a\u0430 \u044d\u043a\u0441\u043f\u043e\u0440\u0442\u0430 \u0437\u0430 {days} \u0434\u043d\u0435\u0439...",
+        "export_empty": "\u0414\u0430\u043d\u043d\u044b\u0445 \u0437\u0430 \u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0435 {days} \u0434\u043d\u0435\u0439 \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u043e.",
+        "export_meals_caption": "\u0414\u043d\u0435\u0432\u043d\u0438\u043a \u043f\u0438\u0442\u0430\u043d\u0438\u044f \u2014 {days} \u0434\u043d\u0435\u0439 ({n} \u0437\u0430\u043f\u0438\u0441\u0435\u0439)",
+        "export_water_caption": "\u0414\u043d\u0435\u0432\u043d\u0438\u043a \u0432\u043e\u0434\u044b \u2014 {days} \u0434\u043d\u0435\u0439 ({n} \u0437\u0430\u043f\u0438\u0441\u0435\u0439)",
+        "timezone_set": "\u2705 \u0427\u0430\u0441\u043e\u0432\u043e\u0439 \u043f\u043e\u044f\u0441: <b>{tz}</b> ({offset}).\n\u0412\u0440\u0435\u043c\u044f \u043d\u0430\u043f\u043e\u043c\u0438\u043d\u0430\u043d\u0438\u0439 \u043e\u0442\u043e\u0431\u0440\u0430\u0436\u0430\u0435\u0442\u0441\u044f \u043f\u043e \u0432\u0430\u0448\u0435\u043c\u0443 \u0432\u0440\u0435\u043c\u0435\u043d\u0438.",
+        "timezone_not_set": "\u043d\u0435 \u0437\u0430\u0434\u0430\u043d (\u0438\u0441\u043f\u043e\u043b\u044c\u0437\u0443\u0435\u0442\u0441\u044f UTC)",
+        "btn_share_location": "\U0001f4cd \u041f\u043e\u0434\u0435\u043b\u0438\u0442\u044c\u0441\u044f \u043c\u0435\u0441\u0442\u043e\u043f\u043e\u043b\u043e\u0436\u0435\u043d\u0438\u0435\u043c",
+        "location_set": "\u2705 \u0427\u0430\u0441\u043e\u0432\u043e\u0439 \u043f\u043e\u044f\u0441: <b>{tz}</b> ({offset}).\n\u0418\u0441\u043f\u043e\u043b\u044c\u0437\u0443\u0439\u0442\u0435 /reminders \u0434\u043b\u044f \u043f\u0440\u043e\u0441\u043c\u043e\u0442\u0440\u0430 \u0440\u0430\u0441\u043f\u0438\u0441\u0430\u043d\u0438\u044f.",
+        "location_no_tz": "\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u043e\u043f\u0440\u0435\u0434\u0435\u043b\u0438\u0442\u044c \u0447\u0430\u0441\u043e\u0432\u043e\u0439 \u043f\u043e\u044f\u0441. \u0423\u043a\u0430\u0436\u0438\u0442\u0435 \u0432\u0440\u0443\u0447\u043d\u0443\u044e: /timezone Europe/Moscow",
+        "location_no_profile": "\u0421\u043d\u0430\u0447\u0430\u043b\u0430 \u0443\u0441\u0442\u0430\u043d\u043e\u0432\u0438\u0442\u0435 \u043f\u0440\u043e\u0444\u0438\u043b\u044c /profile, \u0437\u0430\u0442\u0435\u043c \u043e\u0442\u043f\u0440\u0430\u0432\u044c\u0442\u0435 \u043c\u0435\u0441\u0442\u043e\u043f\u043e\u043b\u043e\u0436\u0435\u043d\u0438\u0435.",
+        "meal_parse_error": "\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0440\u0430\u0437\u043e\u0431\u0440\u0430\u0442\u044c \u0434\u0430\u043d\u043d\u044b\u0435. \u041f\u0435\u0440\u0435\u0444\u0440\u0430\u0437\u0438\u0440\u0443\u0439\u0442\u0435 \u043e\u043f\u0438\u0441\u0430\u043d\u0438\u0435.",
+        "meal_error": "\u0427\u0442\u043e-\u0442\u043e \u043f\u043e\u0448\u043b\u043e \u043d\u0435 \u0442\u0430\u043a. \u041f\u043e\u043f\u0440\u043e\u0431\u0443\u0439\u0442\u0435 \u0435\u0449\u0451 \u0440\u0430\u0437.",
+        "photo_parse_error": "\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0440\u0430\u0441\u043f\u043e\u0437\u043d\u0430\u0442\u044c \u0435\u0434\u0443 \u043d\u0430 \u0444\u043e\u0442\u043e. \u0414\u043e\u0431\u0430\u0432\u044c\u0442\u0435 \u043e\u043f\u0438\u0441\u0430\u043d\u0438\u0435 \u0432 \u043f\u043e\u0434\u043f\u0438\u0441\u0438.",
+        "photo_error": "\u041e\u0448\u0438\u0431\u043a\u0430 \u043f\u0440\u0438 \u0430\u043d\u0430\u043b\u0438\u0437\u0435 \u0444\u043e\u0442\u043e. \u041f\u043e\u043f\u0440\u043e\u0431\u0443\u0439\u0442\u0435 \u0435\u0449\u0451 \u0440\u0430\u0437.",
+        "not_food": "\u042f \u043e\u0442\u0441\u043b\u0435\u0436\u0438\u0432\u0430\u044e \u0435\u0434\u0443 \u0438 \u043a\u0430\u043b\u043e\u0440\u0438\u0438. \u041d\u0430\u043f\u0438\u0448\u0438\u0442\u0435 \u043e\u043f\u0438\u0441\u0430\u043d\u0438\u0435:\n  \u043a\u0443\u0440\u0438\u043d\u044b\u0439 \u0441\u0430\u043b\u0430\u0442 \u0441 \u0440\u0438\u0441\u043e\u043c\n  2 \u044f\u0439\u0446\u0430, \u0442\u043e\u0441\u0442\n\n/help \u2014 \u0432\u0441\u0435 \u043a\u043e\u043c\u0430\u043d\u0434\u044b.",
+        "clarify_fallback": "\U0001f37d \u0414\u043e\u0431\u0430\u0432\u044c\u0442\u0435 \u043f\u043e\u0434\u0440\u043e\u0431\u043d\u043e\u0441\u0442\u0435\u0439?\n\u0421\u043f\u043e\u0441\u043e\u0431 \u043f\u0440\u0438\u0433\u043e\u0442\u043e\u0432\u043b\u0435\u043d\u0438\u044f, \u0432\u0435\u0441 \u0438\u043b\u0438 \u0438\u043d\u0433\u0440\u0435\u0434\u0438\u0435\u043d\u0442\u044b \u043f\u043e\u043c\u043e\u0433\u0443\u0442:\n  \u043d\u0430\u043f\u0440.: *2 \u0432\u0430\u0440\u0451\u043d\u044b\u0445 \u044f\u0439\u0446\u0430* \u00b7 *150\u0433 \u0433\u0440\u0443\u0434\u043a\u0438 \u0433\u0440\u0438\u043b\u044c* \u00b7 *200\u0433 \u0436\u0430\u0440\u0435\u043d\u043e\u0433\u043e \u0440\u0438\u0441\u0430*",
+        "language_set_en": "\u2705 \u042f\u0437\u044b\u043a \u0438\u0437\u043c\u0435\u043d\u0451\u043d \u043d\u0430 <b>English</b>.",
+        "language_set_ru": "\u2705 \u042f\u0437\u044b\u043a \u0438\u0437\u043c\u0435\u043d\u0451\u043d \u043d\u0430 <b>\u0420\u0443\u0441\u0441\u043a\u0438\u0439</b>.",
+        "language_set_hy": "\u2705 \u042f\u0437\u044b\u043a \u0438\u0437\u043c\u0435\u043d\u0451\u043d \u043d\u0430 <b>\u0410\u0440\u043c\u044f\u043d\u0441\u043a\u0438\u0439</b>.",
+        "language_choose": "\u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u044f\u0437\u044b\u043a:",
+        "btn_lang_en": "\U0001f1ec\U0001f1e7 English",
+        "btn_lang_ru": "\U0001f1f7\U0001f1fa \u0420\u0443\u0441\u0441\u043a\u0438\u0439",
+        "btn_lang_hy": "\U0001f1e6\U0001f1f2 \u540d\u56fd",
+        "mealplan_generating": "\u2699\ufe0f \u0413\u0435\u043d\u0435\u0440\u0430\u0446\u0438\u044f 7-\u0434\u043d\u0435\u0432\u043d\u043e\u0433\u043e \u043f\u043b\u0430\u043d\u0430 \u043f\u0438\u0442\u0430\u043d\u0438\u044f...\n\u042d\u0442\u043e \u0437\u0430\u0439\u043c\u0451\u0442 ~10 \u0441\u0435\u043a\u0443\u043d\u0434. \u041f\u043e\u0434\u043e\u0436\u0434\u0438\u0442\u0435.",
+        "mealplan_error_json": "\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0441\u043e\u0437\u0434\u0430\u0442\u044c \u043f\u043b\u0430\u043d. \u041f\u043e\u043f\u0440\u043e\u0431\u0443\u0439\u0442\u0435 \u0435\u0449\u0451 \u0440\u0430\u0437.",
+        "mealplan_error": "\u041e\u0448\u0438\u0431\u043a\u0430 \u043f\u0440\u0438 \u0433\u0435\u043d\u0435\u0440\u0430\u0446\u0438\u0438. \u041f\u043e\u043f\u0440\u043e\u0431\u0443\u0439\u0442\u0435 \u0435\u0449\u0451 \u0440\u0430\u0437.",
+        "delmeal_not_found": "\u0417\u0430\u043f\u0438\u0441\u044c #{id} \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u0430.",
+        "delmeal_done": "\u2705 \u0423\u0434\u0430\u043b\u0435\u043d\u043e #{id}: {name} (~{cal} \u043a\u043a\u0430\u043b)",
+        "delmeal_cb_not_found": "\u0417\u0430\u043f\u0438\u0441\u044c #{id} \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u0430 (\u0443\u0436\u0435 \u0443\u0434\u0430\u043b\u0435\u043d\u0430?).",
+        "delmeal_cb_deleted_toast": "\u0423\u0434\u0430\u043b\u0435\u043d\u043e: {name}",
+        "delmeal_cb_deleted_edit": "\u2705 \u0423\u0434\u0430\u043b\u0435\u043d\u043e: {name}",
+        "btn_invalid": "\u041d\u0435\u0432\u0435\u0440\u043d\u044b\u0439 \u0437\u0430\u043f\u0440\u043e\u0441.",
+        "btn_not_yours": "\u042d\u0442\u0430 \u043a\u043d\u043e\u043f\u043a\u0430 \u043d\u0435 \u0434\u043b\u044f \u0432\u0430\u0441.",
+        "reminder_msg": "\U0001f4a7 \u041d\u0430\u043f\u043e\u043c\u0438\u043d\u0430\u043d\u0438\u0435 \u043e \u0432\u043e\u0434\u0435!\n\u041f\u043e\u0440\u0430 \u0432\u044b\u043f\u0438\u0442\u044c ~{amount}\u043c\u043b \u0432\u043e\u0434\u044b.\n/water {amount} \u2014 \u0437\u0430\u043f\u0438\u0441\u0430\u0442\u044c.",
+    },
+    "hy": {
+        "start_msg": (
+            "\U0001f44b \u0532\u0561\u0580\u0587\u0582, {name}! \u0535\u057d \u056f\u0561\u056c\u0578\u0580\u056b\u0561\u0576\u0576\u0565\u0580\u056b\u0576 \u0565\u0574 \u0570\u0565\u057f\u0587\u0578\u0582\u0574.\n\n"
+            "1\ufe0f\u20e3 <b>\u053f\u0561\u0580\u0563\u0561\u0580\u0561\u057e\u0578\u0580\u0565\u0584 \u056f\u0565\u0580 \u057a\u0580\u0578\u0586\u056b\u056c\u0568</b>\u0589\n"
+            "   <code>/profile 180 75 28 male moderate</code>\n\n"
+            "2\ufe0f\u20e3 <b>\u0533\u0580\u0561\u0576\u0581\u0565\u0584 \u056b\u0576\u0579</b> \u056f\u0565\u0580\u0561\u0584\u0589\n"
+            "   <code>2 \u0571\u0578\u0582, \u056f\u0561\u0580\u056f\u0561\u0576\u0564\u0561\u056f \u056f\u0561\u0580\u0561\u0563\u0578\u057e</code>\n\n"
+            "3\ufe0f\u20e3 <b>\u0531\u056c\u0578\u057e \u0562\u0561\u0581\u0565\u0584 \u0571\u0587\u0580\u0568.</b> /today\n\n"
+            "\u053f\u0561\u0574 \u0578\u0582\u0572\u0561\u0580\u056f\u0565\u0584 \U0001f4f7 \u056c\u0578\u0582\u057d\u0561\u0576\u056f\u0561\u0580 \u0581\u0561\u0576\u056f\u0561\u0581\u0561\u056e \u056a\u0561\u0574\u0561\u0576\u0561\u056f:"
+        ),
+        "btn_quickstart": "\U0001f4d6 \u0531\u0580\u0561\u0563 \u0574\u0587\u056f\u0576\u0561\u0580\u056f",
+        "estimate_header": "\U0001f37d <b>\u053f\u0561\u056c\u0578\u0580\u056b\u0561\u0576\u0576\u0565\u0580\u056b \u0563\u0576\u0561\u0570\u0561\u057f\u0578\u0582\u0574</b>",
+        "meal_total": "<b>\u0538\u0576\u0564\u0561\u0574\u0587\u0576\u0568:</b> ~{total} \u056f\u056f\u0561\u056c | \u054d\u057a: {p}\u0563 | \u0543: {f}\u0563 | \u0531\u056e: {c}\u0563 | \u0532\u0561\u0566\u0574\u0578\u0582\u0566: {fib}\u0563",
+        "today_progress": "\n\U0001f4ca <b>\u0531\u0575\u057d\u0585\u0580:</b> {cal} / {limit} \u056f\u056f\u0561\u056c\n{bar} (\u0574\u0576\u0561\u0581\u0587\u056c \u0567 {remaining})",
+        "over_limit": "\n\u26a0\ufe0f <b>\u054d\u0561\u0570\u0574\u0561\u0576\u0568 \u0563\u0587\u0580\u0561\u0566\u0561\u0576\u0581\u057e\u0561\u056e \u0567!</b> {cal} / {limit} \u056f\u056f\u0561\u056c\n{bar} (+{over} \u0561\u057e\u0587\u056c\u056b)",
+        "confidence_legend": "\n<i>\u2705 \u0562\u0561\u0580\u0571\u0580 \u0573\u0577\u0563\u0580\u056f\u0578\u0582\u0569\u0575\u0578\u0582\u0576 \u00b7 \U0001f7e1 \u0563\u0576\u0561\u0570\u0561\u057f\u0578\u0582\u0574 \u00b7 \u26a0\ufe0f \u0561\u0576\u0570\u057d\u057f\u0561\u056f</i>",
+        "today_header": "\U0001f4cb <b>\u0531\u0575\u057d\u0585\u0580\u057e\u0561 \u0573\u0561\u0577\u0587\u0580:</b>",
+        "today_empty": "\u0531\u0575\u057d\u0585\u0580 \u0564\u0587\u0580 \u0578\u0579\u056b\u0576\u0579 \u0579\u056b \u0563\u0580\u0561\u0576\u0581\u057e\u0587\u056c. \u0553\u0561\u0580\u0566\u0561\u057a\u0565\u057d \u0563\u0580\u0565\u0584 \u056b\u0576\u0579 \u056f\u0587\u0580\u0561\u0584!",
+        "today_total": "\n<b>\u0538\u0576\u0564\u0561\u0574\u0587\u0576\u0568:</b> {cal} \u056f\u056f\u0561\u056c | \u054d\u057a: {p}\u0563 | \u0543: {f}\u0563 | \u0531\u056e: {c}\u0563",
+        "today_remaining": "\U0001f4ca {cal} / {limit} \u056f\u056f\u0561\u056c (\u0574\u0576\u0561\u0581\u0587\u056c \u0567 {remaining})",
+        "today_over": "\u26a0\ufe0f <b>\u054d\u0561\u0570\u0574\u0561\u0576\u0568 \u0563\u0587\u0580\u0561\u0566\u0561\u0576\u0581\u057e\u0561\u056e \u0567!</b> {cal} / {limit} \u056f\u056f\u0561\u056c (+{over})",
+        "btn_delete": "\U0001f5d1 \u0541\u0576\u0541\u0587\u056c: {name}",
+        "water_status_remaining": "\U0001f4a7 \u0531\u0575\u057d\u0585\u0580: {total} / {target} \u0574\u056c (\u0574\u0576\u0561\u0581\u0587\u056c \u0567 {remaining} \u0574\u056c)",
+        "water_status_done": "\u2705 \u0531\u0575\u057d\u0585\u0580: {total} / {target} \u0574\u056c \u2014 \u0576\u0578\u0580\u0574\u0561\u0576 \u056f\u0561\u057f\u0561\u0580\u057e\u0561\u056e \u0567!",
+        "water_logged": "\U0001f4a7 \u0533\u0580\u0561\u0576\u0581\u057e\u0561\u056e \u0567 {amount} \u0574\u056c.\n{status}",
+        "water_quick_header": "\U0001f4a7 \u0531\u0580\u0561\u0563 \u057b\u0580\u056b \u0563\u0580\u0561\u0576\u0581\u0578\u0582\u0574\n{status}",
+        "water_quick_logged": "\u2705 \u0533\u0580\u0561\u0576\u0581\u057e\u0561\u056e {amount} \u0574\u056c!\n{status}",
+        "btn_water": "\U0001f4a7 {ml} \u0574\u056c",
+        "water_invalid_number": "\u053d\u0576\u0564\u0580\u0578\u0582\u0574 \u0587\u0576\u0584 \u0576\u0577\u0587\u056c \u0569\u056b\u057e. \u0555\u0580\u056b\u0576\u0561\u056f\u0589 /water 500",
+        "water_invalid_range": "\u0554\u0561\u0576\u0561\u056f\u0568 \u057a\u0565\u057f\u0584 \u056c\u056b\u0576\u056b 1-\u056b\u0581 5000 \u0574\u056c.",
+        "reminders_status": "\U0001f4a7 \u0541\u0580\u056b \u0570\u056b\u0577\u0587\u0581\u0578\u0582\u0574\u0576\u0587\u0580\u0568 <b>{status}</b> \u0587\u0576 \u0561\u0575\u057d \u0579\u0561\u057f\u056b \u0570\u0561\u0574\u0561\u0580.\n\n\u0541\u0561\u0574\u0561\u0576\u0561\u056f\u0561\u0563\u0580\u0578\u0582\u0569\u0575\u0578\u0582\u0576:\n{schedule}",
+        "reminders_on": "\u0544\u053b\u0531\u053e\u0531\u053e \u2705",
+        "reminders_off": "\u0531\u0546\u0541\u0531\u053e\u0531\u053e",
+        "reminders_enabled": "\U0001f4a7 \u0541\u0580\u056b \u0570\u056b\u0577\u0587\u0581\u0578\u0582\u0574\u0576\u0587\u0580\u0568 \u0574\u056b\u0561\u0581\u057e\u0561\u056e \u0587\u0576!\n\n\u0541\u0561\u0574\u0561\u0576\u0561\u056f\u0561\u0563\u0580\u0578\u0582\u0569\u0575\u0578\u0582\u0576:\n{schedule}",
+        "reminders_disabled": "\u0541\u0580\u056b \u0570\u056b\u0577\u0587\u0581\u0578\u0582\u0574\u0576\u0587\u0580\u0568 \u0561\u0576\u0541\u0561\u057e\u0561\u056e \u0587\u0576.",
+        "btn_turn_on": "\u0544\u056b\u0561\u0581\u0576\u0587\u056c",
+        "btn_turn_off": "\u0531\u0576\u0541\u0561\u057e\u0587\u056c",
+        "reset_choose": "\u053b\u0576\u0579 \u057e\u0587\u0580\u0561\u056f\u0561\u0576\u0563\u0576\u0587\u056c?",
+        "reset_meals_done": "\u2705 \u0531\u0575\u057d\u0585\u0580\u057e\u0561 \u0573\u0561\u0577\u0587\u0580\u056b \u0563\u0580\u0561\u55c8\u0578\u0582\u0574\u0576\u0587\u0580\u0568 \u0541\u0576\u0541\u057e\u0561\u056e \u0587\u0576.",
+        "reset_water_done": "\u2705 \u0531\u0575\u057d\u0585\u0580\u057e\u0561 \u0541\u0580\u056b \u0563\u0580\u0561\u55c8\u0578\u0582\u0574\u0576\u0587\u0580\u0568 \u0541\u0576\u0541\u057e\u0561\u056e \u0587\u0576.",
+        "reset_all_confirm": "\u054e\u057d\u057f\u0561\u0570 \u0587\u0584? \u054d\u0561 \u056f\u0541\u0576\u0541\u056b \u0532\u0555\u0548\u0546\u053c\u056b \u0577\u0587\u0580 \u057f\u057e\u0575\u0561\u056c\u0576\u0587\u0580\u0568.\n\u540b\u0576\u0561\u0580\u0561\u057e\u0578\u0580 \u0579\u0587 \u057e\u0587\u0580\u0561\u056f\u0561\u0576\u0563\u0576\u0587\u056c.",
+        "reset_all_done": "\u2705 \u0532\u0578\u056c\u0578\u0580\u0576 \u0587\u0580 \u057f\u057e\u0575\u0561\u056c\u0576\u0587\u0580\u0568 \u0541\u0576\u0541\u057e\u0561\u056e \u0587\u0576.",
+        "reset_cancelled": "\u054e\u0587\u0580\u0561\u056f\u0561\u0576\u0563\u0578\u0582\u0574\u0568 \u0579\u0587\u0563\u0561\u0580\u056f\u057e\u0561\u056e \u0567. \u0532\u0578\u056c\u0578\u0580\u0576 \u0587\u0580 \u057f\u057e\u0575\u0561\u056c\u0576\u0587\u0580\u0568 \u0561\u057a\u0561\u0570\u0578\u057e \u0587\u0576.",
+        "btn_reset_meals": "\U0001f5d1 \u0531\u0575\u057d\u0585\u0580\u057e\u0561 \u0573\u0561\u0577",
+        "btn_reset_water": "\U0001f5d1 \u0531\u0575\u057d\u0585\u0580\u057e\u0561 \u0541\u0578\u0582\u0580",
+        "btn_reset_all": "\u26a0\ufe0f \u0531\u0544\u0535\u0546 \u053b\u0546\u0549",
+        "btn_yes_delete": "\u0531\u0575\u0578, \u0541\u0576\u0541\u0587\u056c \u0561\u0574\u0587\u0576 \u056b\u0576\u0579",
+        "btn_cancel": "\u0549\u0587\u0572\u0561\u0580\u056f\u0587\u056c",
+        "goal_current": "\U0001f3af \u0538\u0576\u0569\u0561\u0581\u056b\u056f \u0576\u057a\u0561\u057f\u0561\u056f: <b>{goal}</b> ({desc})\n\u0538\u0576\u057f\u0580\u0565\u0584 \u0576\u0578\u0580 \u0576\u057a\u0561\u057f\u0561\u056f:",
+        "goal_updated": "\u2705 \u0546\u057a\u0561\u057f\u0561\u056f\u0568 \u0569\u0561\u0580\u0574\u0561\u0581\u057e\u0561\u056e \u0567: <b>{goal}</b> ({desc})\n\u0538\u0576\u057f\u0580\u0565\u0584 \u0576\u0578\u0580 \u0576\u057a\u0561\u057f\u0561\u056f:",
+        "week_header": "\U0001f4c5 \u0547\u0561\u0562\u0561\u0569\u0561\u056f\u0561\u0576 \u0561\u0574\u0583\u0578\u0583\u0578\u0582\u0574:",
+        "week_empty": "\u054e\u0587\u0580\u056b\u0576 7 \u0585\u0580\u056b \u057f\u057e\u0575\u0561\u056c\u0576\u0587\u0580 \u0579\u056f\u0561\u0576.",
+        "week_over": "+{diff} \u0561\u057e\u0587\u056c\u056b",
+        "week_under": "{diff} \u057d\u0561\u0570\u0574\u0561\u0576\u0561\u056f\u056f\u056b\u0576",
+        "week_total": "\u0547\u0561\u0562\u0561\u0569\u0561\u056f\u0561\u0576 \u0538\u0576\u0564\u0561\u0574\u0587\u0576\u0568: {total} \u056f\u056f\u0561\u056c",
+        "week_avg_macros": "\u0535\u0580\u0578\u0580\u0561\u056f\u0561\u0576 \u0574\u0561\u056f\u0580\u0578\u057d\u0576\u0587\u0580/\u0585\u0580: \u054d\u057a: {p}\u0563 | \u0543: {f}\u0563 | \u0531\u056e: {c}\u0563",
+        "setlimit_updated_macros": "\u053c\u056b\u0574\u056b\u0569\u0568 \u0569\u0561\u0580\u0574\u0561\u0581\u057e\u0561\u056e \u0567: {old} \u2192 {new} \u056f\u056f\u0561\u056c\n\u0544\u0561\u056f\u0580\u0578\u057d\u0576\u0587\u0580: \u054d\u057a: {p}\u0563 | \u0543: {f}\u0563 | \u0531\u056e: {c}\u0563",
+        "setlimit_updated": "\u053c\u056b\u0574\u056b\u0569\u0568 \u0569\u0561\u0580\u0574\u0561\u0581\u057e\u0561\u056e \u0567: {old} \u2192 {new} \u056f\u056f\u0561\u056c",
+        "history_empty": "{date}-\u056b \u0563\u0580\u0561\u55c8\u0578\u0582\u0574\u0576\u0587\u0580 \u0579\u056f\u0561\u0576.",
+        "history_header": "\U0001f4cb \u0543\u0561\u0577\u0587\u0580 {date}:",
+        "stats_header": "\U0001f4ca \u0532\u0565\u0580 \u057e\u056b\u0573\u0561\u056f\u0561\u0563\u0580\u0578\u0582\u0569\u0575\u0578\u0582\u0576\u0568 (\u057e\u0587\u0580\u056b\u0576 30 \u0585\u0580):\n",
+        "stats_empty": "\u0534\u0587\u0580 \u057f\u057e\u0575\u0561\u056c\u0576\u0587\u0580 \u0579\u056f\u0561\u0576. \u054d\u056f\u057d\u0587\u0584 \u0561\u0580\u0541\u0561\u0576\u0561\u0563\u0580\u0587\u056c!",
+        "weight_updated": "\u2705 \u0554\u0561\u0577\u0568 \u0569\u0561\u0580\u0574\u0561\u0581\u057e\u0561\u056e \u0567: {weight} \u056f\u0563.\n\n\u0541\u0580\u056b \u0576\u0578\u0580 \u0576\u0578\u0580\u0574: {water_target} \u0574\u056c/\u0585\u0580",
+        "export_preparing": "\u23f3 \u0531\u0580\u057f\u0561\u0570\u0561\u0576\u0578\u0582\u0574\u0568 \u0576\u0561\u056d\u0561\u057a\u0561\u057f\u057e\u0578\u0582\u0574 \u0567 {days} \u0585\u0580\u057e\u0561 \u0570\u0561\u0574\u0561\u0580...",
+        "export_empty": "\u054e\u0587\u0580\u056b\u0576 {days} \u0585\u0580\u057e\u0561 \u057f\u057e\u0575\u0561\u056c\u0576\u0587\u0580 \u0579\u0565\u0576 \u0563\u057f\u0576\u057e\u0565\u056c.",
+        "export_meals_caption": "\u054d\u0576\u0576\u0564\u056b \u0585\u0580\u0561\u0563\u056b\u0580 \u2014 {days} \u0585\u0580 ({n} \u0563\u0580\u0561\u55c8\u0578\u0582\u0574)",
+        "export_water_caption": "\u0541\u0580\u056b \u0585\u0580\u0561\u0563\u056b\u0580 \u2014 {days} \u0585\u0580 ({n} \u0563\u0580\u0561\u55c8\u0578\u0582\u0574)",
+        "timezone_set": "\u2705 \u542a\u0561\u0574\u0561\u0576\u0561\u056f\u0561\u0575\u056b\u0576 \u0563\u0578\u057f\u0578\u0582\u0569\u0575\u0578\u0582\u0576: <b>{tz}</b> ({offset}).",
+        "timezone_not_set": "\u0579\u056b \u0576\u0577\u057e\u0561\u056e (UTC)",
+        "btn_share_location": "\U0001f4cd \u053f\u056b\u057d\u057e\u0565\u056c \u056b\u0576\u056f \u0563\u057f\u0576\u057e\u0561\u056e\u0578\u0582\u0569\u0575\u0578\u0582\u0576\u0568",
+        "location_set": "\u2705 \u0535\u0580\u056f\u0580\u057e\u0561\u056e \u542a\u0561\u0574\u0561\u0576\u0561\u056f\u0561\u0575\u056b\u0576 \u0563\u0578\u057f\u0578\u0582\u0569\u0575\u0578\u0582\u0576: <b>{tz}</b> ({offset}).",
+        "location_no_tz": "\u0579\u0570\u0561\u057b\u0578\u0572\u057e\u0587\u0581 \u0561\u0574\u0562\u0578\u0572\u057b\u0587\u056c. \u0546\u0577\u0587\u0584 \u0551\u0580\u0561\u0564: /timezone Europe/Berlin",
+        "location_no_profile": "\u053d\u0576\u0564\u0580\u0578\u0582\u0574 \u0587\u0576\u0584 \u0576\u0561\u0056linguistically /profile, \u0561\u057a\u0561 \u056f\u056b\u057d\u057e\u0587\u0584 \u0563\u057f\u0576\u057e\u0561\u056e\u0578\u0582\u0569\u0575\u0578\u0582\u0576\u0568.",
+        "meal_parse_error": "\u0579\u0570\u0561\u057b\u0578\u0572\u057e\u0587\u0581 \u057e\u0587\u0580\u056c\u0578\u0582\u056e\u0587\u056c. \u0553\u0578\u0580\u0561\u0541 \u0561\u0575\u056c \u056f\u0587\u0580\u057a \u0576\u056f\u0561\u0580\u0561\u0563\u0580\u0565\u056c.",
+        "meal_error": "\u053b\u0576\u0579-\u0578\u0580 \u0562\u0561\u0576 \u057d\u056d\u0561\u056c \u0565\u0572\u0561\u057e. \u0553\u0578\u0580\u0541\u0565\u0584 \u0576\u0578\u0580\u056b\u0581.",
+        "photo_parse_error": "\u0579\u0570\u0561\u057b\u0578\u0572\u057e\u0587\u0581 \u0579\u0561\u0576\u0561\u0579\u0565\u056c \u0578\u0582\u057f\u0565\u056c\u056b\u0584\u0568. \u0531\u057e\u0565\u056c\u0561\u0581\u0580\u0565\u0584 \u0576\u056f\u0561\u0580\u0561\u0563\u0580\u0578\u0582\u0569\u0575\u0578\u0582\u0576.",
+        "photo_error": "\u054d\u056d\u0561\u056c \u056c\u0578\u0582\u057d\u0561\u0576\u056f\u0561\u0580\u056b \u057e\u0587\u0580\u056c\u0578\u0582\u056e\u0578\u0582\u0569\u0575\u0561\u0576 \u056a\u0561\u0574\u0561\u0576\u0561\u056f. \u0553\u0578\u0580\u0541\u0565\u0584 \u0576\u0578\u0580\u056b\u0581.",
+        "not_food": "\u0535\u057d \u0570\u0565\u057f\u0587\u0578\u0582\u0574 \u056f\u0561\u056c\u0578\u0580\u056b\u0561\u0576\u0576\u0565\u0580\u056b\u0576. \u0548\u0572\u0561\u0580\u056f\u0587\u0584 \u0576\u056f\u0561\u0580\u0561\u0563\u0580\u0578\u0582\u0569\u0575\u0578\u0582\u0576:\n  \u0570\u0561\u057e\u056b \u0578\u0582\u057f\u0565\u057d\u057f\u056c \u0562\u0580\u0576\u0541\u0578\u057e\n  2 \u0571\u0578\u0582, \u056f\u0561\u0580\u056f\u0561\u0576\u0564\u0561\u056f\n\n/help \u2014 \u0562\u0578\u056c\u0578\u0580 \u0570\u0580\u0561\u0574\u0561\u0576\u0576\u0587\u0580\u0568.",
+        "clarify_fallback": "\U0001f37d \u053f\u0561\u0580\u0578\u0572 \u0565\u0584 \u0561\u057e\u0565\u056c\u056b \u0574\u0561\u0576\u0580\u0561\u0574\u0561\u057d\u0576 \u0576\u056f\u0561\u0580\u0561\u0563\u0580\u0565\u056c:\n  \u0585\u0580.\u0562. *2 \u056d\u0561\u0577\u0561\u056e \u0571\u0578\u0582* \u00b7 *150\u0563 \u056f\u0580\u0561\u056f\u056b \u057e\u0580\u0561 \u0570\u0561\u057e* \u00b7 *200\u0563 \u057f\u0561\u057a\u0561\u056f\u0561\u056e \u0562\u0580\u056b\u0576\u0541*",
+        "language_set_en": "\u2705 \u053c\u0587\u0566\u0578\u0582\u0576\u0568 \u0583\u0578\u056d\u057e\u0561\u056e \u0567 <b>English</b>-\u056b.",
+        "language_set_ru": "\u2705 \u053c\u0587\u0566\u0578\u0582\u0576\u0568 \u0583\u0578\u056d\u057e\u0561\u056e \u0567 <b>\u054c\u0578\u0582\u057d\u0565\u0580\u0565\u0576</b>-\u056b.",
+        "language_set_hy": "\u2705 \u053c\u0587\u0566\u0578\u0582\u0576\u0568 \u0583\u0578\u056d\u057e\u0561\u056e \u0567 <b>\u540e\u0561\u0575\u0565\u0580\u0587\u0576</b>-\u056b.",
+        "language_choose": "\u0538\u0576\u057f\u0580\u0565\u0584 \u056c\u0587\u0566\u0578\u0582:",
+        "btn_lang_en": "\U0001f1ec\U0001f1e7 English",
+        "btn_lang_ru": "\U0001f1f7\U0001f1fa \u054c\u0578\u0582\u057d\u0565\u0580\u0565\u0576",
+        "btn_lang_hy": "\U0001f1e6\U0001f1f2 \u540e\u0561\u0575\u0565\u0580\u0587\u0576",
+        "mealplan_generating": "\u2699\ufe0f \u0532\u0565\u0580 7-\u0585\u0580\u0575\u0561 \u057d\u0576\u0576\u0564\u056b \u057a\u056c\u0561\u0576\u0568 \u057d\u057f\u0587\u0572\u057e\u0578\u0582\u0574 \u0567...\n\u054d\u0561 \u056f\u057f\u0587\u057e\u056b ~10 \u057e\u0561\u0575\u0580\u056f\u0575\u0561\u0576. \u053d\u0576\u0564\u0580\u0578\u0582\u0574 \u0587\u0576\u0584 \u057d\u057a\u0561\u057d\u0565\u056c.",
+        "mealplan_error_json": "\u0579\u0570\u0561\u057b\u0578\u0572\u057e\u0587\u0581 \u057d\u057f\u0587\u0572\u0587\u056c \u057e\u0561\u057e\u0587\u0580 \u057d\u0576\u0576\u0564\u056b \u057a\u056c\u0561\u0576. \u0553\u0578\u0580\u0541\u0565\u0584 \u0576\u0578\u0580\u056b\u0581.",
+        "mealplan_error": "\u054d\u056d\u0561\u056c \u0565\u0572\u0561\u057e \u057a\u056c\u0561\u0576\u056b \u057d\u057f\u0587\u0572\u0561\u0563\u0574\u0561\u0576 \u056a\u0561\u0574\u0561\u0576\u0561\u056f. \u0553\u0578\u0580\u0541\u0565\u0584 \u0576\u0578\u0580\u056b\u0581.",
+        "delmeal_not_found": "#{id} \u0563\u0580\u0561\u55c8\u0578\u0582\u0574\u0568 \u0579\u056b \u0563\u057f\u0576\u057e\u0565\u056c.",
+        "delmeal_done": "\u2705 \u0541\u0576\u0541\u057e\u0561\u056e #{id}: {name} (~{cal} \u056f\u056f\u0561\u056c)",
+        "delmeal_cb_not_found": "#{id} \u0563\u0580\u0561\u55c8\u0578\u0582\u0574\u0568 \u0579\u056b \u0563\u057f\u0576\u057e\u0565\u056c (\u0561\u0580\u0564\u0587\u0576 \u0541\u0576\u0541\u057e\u0561\u056e?).",
+        "delmeal_cb_deleted_toast": "\u0541\u0576\u0541\u057e\u0561\u056e: {name}",
+        "delmeal_cb_deleted_edit": "\u2705 \u0541\u0576\u0541\u057e\u0561\u056e: {name}",
+        "btn_invalid": "\u0531\u0576\u057e\u0561\u057e\u0587\u0580 \u0570\u0561\u0580\u0581\u0578\u0582\u0574.",
+        "btn_not_yours": "\u0531\u0575\u057d \u056f\u0578\u0573\u0561\u056f\u0568 \u0541\u0587\u0566 \u0570\u0561\u0574\u0561\u0580 \u0579\u0587.",
+        "reminder_msg": "\U0001f4a7 \u0541\u0580\u056b \u0570\u056b\u0577\u0587\u0581\u0578\u0582\u0574!\n\u0542\u0561\u0574\u0576 \u0567 \u056d\u0574\u0565\u056c ~{amount}\u0574\u056c \u0541\u0578\u0582\u0580.\n/water {amount} \u2014 \u0561\u0580\u0541\u0561\u0576\u0561\u0563\u0580\u0565\u056c.",
+    },
+}
+
+
+def t(lang: str, key: str, **kwargs) -> str:
+    """Look up a translation key, falling back to English if not found."""
+    text = TRANSLATIONS.get(lang, {}).get(key) or TRANSLATIONS["en"].get(key, key)
+    if kwargs:
+        try:
+            return text.format(**kwargs)
+        except (KeyError, ValueError):
+            return text
+    return text
+
 
 MEALPLAN_PROMPT = (
     "You are a professional dietitian. Create a complete 7-day meal plan "
@@ -419,6 +743,9 @@ def db_init() -> None:
     cur.execute(
         "ALTER TABLE profiles ADD COLUMN IF NOT EXISTS user_timezone TEXT"
     )
+    cur.execute(
+        "ALTER TABLE profiles ADD COLUMN IF NOT EXISTS language TEXT DEFAULT 'en'"
+    )
     conn.commit()
     cur.close()
     conn.close()
@@ -652,6 +979,46 @@ def get_user_timezone(user_id: int):
         return ZoneInfo(tz_name)
     except (ZoneInfoNotFoundError, KeyError):
         return timezone.utc
+
+
+def save_user_language(user_id: int, lang: str) -> bool:
+    """UPDATE profiles SET language. Returns False if no profile row."""
+    conn = db_connect()
+    cur = conn.cursor()
+    try:
+        cur.execute("UPDATE profiles SET language = %s WHERE user_id = %s", (lang, user_id))
+        updated = cur.rowcount > 0
+        conn.commit()
+        return updated
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cur.close()
+        conn.close()
+
+
+def get_user_language(user_id: int) -> str:
+    """Return stored language code, defaulting to DEFAULT_LANGUAGE."""
+    profile = get_profile(user_id)
+    if not profile:
+        return DEFAULT_LANGUAGE
+    return profile.get("language") or DEFAULT_LANGUAGE
+
+
+async def get_lang(update, context) -> str:
+    """Resolve user's language with session caching and Telegram auto-detection."""
+    if "lang" in context.user_data:
+        return context.user_data["lang"]
+    user_id = update.effective_user.id
+    lang = get_user_language(user_id)
+    if lang == DEFAULT_LANGUAGE:
+        tg_code = (update.effective_user.language_code or "en")[:2].lower()
+        if tg_code in SUPPORTED_LANGUAGES and tg_code != DEFAULT_LANGUAGE:
+            lang = tg_code
+            save_user_language(user_id, lang)
+    context.user_data["lang"] = lang
+    return lang
 
 
 def _format_time_in_tz(hour: int, minute: int, tz) -> str:
@@ -1251,21 +1618,21 @@ def _html(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
-def _build_water_status_text(user_id: int) -> str:
+def _build_water_status_text(user_id: int, lang: str = "en") -> str:
     """Return a one-line water progress string for the current user."""
     total = get_today_water(user_id)
     target = get_water_target(user_id)
     remaining = target - total
     if remaining > 0:
-        return f"\U0001f4a7 Today: {total} / {target}ml ({remaining}ml remaining)"
-    return f"\u2705 Today: {total} / {target}ml \u2014 target reached!"
+        return t(lang, "water_status_remaining", total=total, target=target, remaining=remaining)
+    return t(lang, "water_status_done", total=total, target=target)
 
 
-def _water_quick_keyboard(user_id: int, chat_id: int) -> InlineKeyboardMarkup:
+def _water_quick_keyboard(user_id: int, chat_id: int, lang: str = "en") -> InlineKeyboardMarkup:
     """2x2 grid of quick water-log buttons (250 / 500 / 750 / 1000 ml)."""
     def _btn(ml: int) -> InlineKeyboardButton:
         return InlineKeyboardButton(
-            f"\U0001f4a7 {ml}ml",
+            t(lang, "btn_water", ml=ml),
             callback_data=f"water_quick:{ml}:{user_id}:{chat_id}",
         )
     return InlineKeyboardMarkup([
@@ -1274,10 +1641,10 @@ def _water_quick_keyboard(user_id: int, chat_id: int) -> InlineKeyboardMarkup:
     ])
 
 
-def format_reply(data: dict, today: dict, targets: dict) -> tuple[str, str]:
+def format_reply(data: dict, today: dict, targets: dict, lang: str = "en") -> tuple[str, str]:
     """Format calorie estimate with daily progress and macros.
     Returns (text, parse_mode) — parse_mode is 'HTML'."""
-    lines = ["\U0001f37d <b>Calorie Estimate</b>"]
+    lines = [t(lang, "estimate_header")]
     for item in data.get("items", []):
         portion = item.get("portion", "")
         portion_str = f" ({_html(portion)})" if portion else ""
@@ -1299,10 +1666,7 @@ def format_reply(data: dict, today: dict, targets: dict) -> tuple[str, str]:
     tf = data.get("total_fat_g", 0)
     tc = data.get("total_carbs_g", 0)
     tfib = data.get("total_fiber_g", 0)
-    lines.append(
-        f"\n<b>Meal total:</b> ~{data.get('total', 0)} kcal"
-        f" | P: {tp}g | F: {tf}g | C: {tc}g | Fiber: {tfib}g"
-    )
+    lines.append(t(lang, "meal_total", total=data.get("total", 0), p=tp, f=tf, c=tc, fib=tfib))
 
     note = data.get("note")
     if note:
@@ -1314,15 +1678,9 @@ def format_reply(data: dict, today: dict, targets: dict) -> tuple[str, str]:
     remaining = cal_limit - cal_today
     bar = _progress_bar(cal_today, cal_limit)
     if remaining >= 0:
-        lines.append(
-            f"\n\U0001f4ca <b>Today:</b> {cal_today} / {cal_limit} kcal\n"
-            f"{bar} ({remaining} remaining)"
-        )
+        lines.append(t(lang, "today_progress", cal=cal_today, limit=cal_limit, bar=bar, remaining=remaining))
     else:
-        lines.append(
-            f"\n\u26a0\ufe0f <b>Over limit!</b> {cal_today} / {cal_limit} kcal\n"
-            f"{bar} (+{abs(remaining)} over)"
-        )
+        lines.append(t(lang, "over_limit", cal=cal_today, limit=cal_limit, bar=bar, over=abs(remaining)))
 
     tp_target = targets["daily_protein_g"]
     tf_target = targets["daily_fat_g"]
@@ -1337,7 +1695,7 @@ def format_reply(data: dict, today: dict, targets: dict) -> tuple[str, str]:
             f"C: {today['carbs_g']}/{tc_target}g {c_bar}"
         )
 
-    lines.append("\n<i>\u2705 high confidence \u00b7 \U0001f7e1 estimated \u00b7 \u26a0\ufe0f uncertain</i>")
+    lines.append(t(lang, "confidence_legend"))
     return "\n".join(lines), "HTML"
 
 
@@ -1346,18 +1704,13 @@ def format_reply(data: dict, today: dict, targets: dict) -> tuple[str, str]:
 # ---------------------------------------------------------------------------
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    lang = await get_lang(update, context)
     name = update.effective_user.first_name or "there"
     keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton("\U0001f4d6 Quick Start Guide", callback_data="help_quickstart"),
+        InlineKeyboardButton(t(lang, "btn_quickstart"), callback_data="help_quickstart"),
     ]])
     await update.message.reply_text(
-        f"\U0001f44b Hi {_html(name)}! I track your calories and macros.\n\n"
-        "1\ufe0f\u20e3 <b>Set your profile</b> for personalized targets:\n"
-        "   <code>/profile 180 75 28 male moderate</code>\n\n"
-        "2\ufe0f\u20e3 <b>Log a meal</b> \u2014 just type what you ate:\n"
-        "   <code>2 eggs, toast with butter</code>\n\n"
-        "3\ufe0f\u20e3 <b>Check your day:</b> /today\n\n"
-        "Or send a \U0001f4f7 photo of your meal anytime!",
+        t(lang, "start_msg", name=_html(name)),
         parse_mode="HTML",
         reply_markup=keyboard,
     )
@@ -1557,10 +1910,11 @@ async def macros_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def today_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    lang = await get_lang(update, context)
     user_id = update.effective_user.id
     meals = get_today_meals(user_id)
     if not meals:
-        await update.message.reply_text("No meals logged today. Just type what you ate!")
+        await update.message.reply_text(t(lang, "today_empty"))
         return
 
     targets = get_targets(user_id)
@@ -1570,30 +1924,27 @@ async def today_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     total_c = sum(m["carbs_g"] for m in meals)
     remaining = targets["daily_limit"] - total_cal
 
-    lines = ["\U0001f4cb <b>Today's meals:</b>"]
+    lines = [t(lang, "today_header")]
     keyboard_rows = []
     for m in meals:
-        t = m["created_at"][11:16]
+        ts = m["created_at"][11:16]
         short = _html(_truncate(m["meal_text"]))
         lines.append(
-            f"\u2022 [{t}] {short}: ~{m['calories']} kcal"
+            f"\u2022 [{ts}] {short}: ~{m['calories']} kcal"
             f" (P:{m['protein_g']}g F:{m['fat_g']}g C:{m['carbs_g']}g)"
         )
         keyboard_rows.append([
             InlineKeyboardButton(
-                f"\U0001f5d1 Delete: {_truncate(m['meal_text'], 25)}",
+                t(lang, "btn_delete", name=_truncate(m["meal_text"], 25)),
                 callback_data=f"delmeal_inline:{m['id']}:{user_id}",
             )
         ])
 
-    lines.append(f"\n<b>Total:</b> {total_cal} kcal | P: {total_p}g | F: {total_f}g | C: {total_c}g")
+    lines.append(t(lang, "today_total", cal=total_cal, p=total_p, f=total_f, c=total_c))
     if remaining >= 0:
-        lines.append(f"\U0001f4ca {total_cal} / {targets['daily_limit']} kcal ({remaining} remaining)")
+        lines.append(t(lang, "today_remaining", cal=total_cal, limit=targets["daily_limit"], remaining=remaining))
     else:
-        lines.append(
-            f"\u26a0\ufe0f <b>Over limit!</b> {total_cal} / {targets['daily_limit']} kcal"
-            f" (+{abs(remaining)} over)"
-        )
+        lines.append(t(lang, "today_over", cal=total_cal, limit=targets["daily_limit"], over=abs(remaining)))
 
     if targets["daily_protein_g"] > 0:
         lines.append(
@@ -1681,39 +2032,41 @@ async def limit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def water_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    lang = await get_lang(update, context)
     user = update.effective_user
     chat_id = update.effective_chat.id
     if not context.args:
-        status = _build_water_status_text(user.id)
+        status = _build_water_status_text(user.id, lang)
         await update.message.reply_text(
-            f"\U0001f4a7 Quick water log\n{status}",
-            reply_markup=_water_quick_keyboard(user.id, chat_id),
+            t(lang, "water_quick_header", status=status),
+            reply_markup=_water_quick_keyboard(user.id, chat_id, lang),
         )
         return
     try:
         amount = int(context.args[0])
     except ValueError:
-        await update.message.reply_text("Please provide a number. Example: /water 500")
+        await update.message.reply_text(t(lang, "water_invalid_number"))
         return
     if amount <= 0 or amount > 5000:
-        await update.message.reply_text("Amount must be between 1 and 5000 ml.")
+        await update.message.reply_text(t(lang, "water_invalid_range"))
         return
 
     save_water(user.id, user.username or user.first_name, chat_id, amount)
-    status = _build_water_status_text(user.id)
+    status = _build_water_status_text(user.id, lang)
     await update.message.reply_text(
-        f"\U0001f4a7 Logged {amount}ml.\n{status}",
-        reply_markup=_water_quick_keyboard(user.id, chat_id),
+        t(lang, "water_logged", amount=amount, status=status),
+        reply_markup=_water_quick_keyboard(user.id, chat_id, lang),
     )
 
 
 async def watertoday_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    lang = await get_lang(update, context)
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
-    status = _build_water_status_text(user_id)
+    status = _build_water_status_text(user_id, lang)
     await update.message.reply_text(
         status,
-        reply_markup=_water_quick_keyboard(user_id, chat_id),
+        reply_markup=_water_quick_keyboard(user_id, chat_id, lang),
     )
 
 
@@ -1755,41 +2108,40 @@ async def reminders_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 
 async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    lang = await get_lang(update, context)
     user_id = update.effective_user.id
     if not context.args:
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("\U0001f5d1 Today's Meals", callback_data=f"reset_action:meals:{user_id}")],
-            [InlineKeyboardButton("\U0001f5d1 Today's Water", callback_data=f"reset_action:water:{user_id}")],
-            [InlineKeyboardButton("\u26a0\ufe0f Everything",  callback_data=f"reset_action:all:{user_id}")],
+            [InlineKeyboardButton(t(lang, "btn_reset_meals"), callback_data=f"reset_action:meals:{user_id}")],
+            [InlineKeyboardButton(t(lang, "btn_reset_water"), callback_data=f"reset_action:water:{user_id}")],
+            [InlineKeyboardButton(t(lang, "btn_reset_all"),   callback_data=f"reset_action:all:{user_id}")],
         ])
-        await update.message.reply_text("What would you like to reset?", reply_markup=keyboard)
+        await update.message.reply_text(t(lang, "reset_choose"), reply_markup=keyboard)
         return
 
     action = context.args[0].lower()
 
     if action == "meals":
         reset_today_meals(user_id)
-        await update.message.reply_text("\u2705 Today's meal logs cleared.")
+        await update.message.reply_text(t(lang, "reset_meals_done"))
     elif action == "water":
         reset_today_water(user_id)
-        await update.message.reply_text("\u2705 Today's water logs cleared.")
+        await update.message.reply_text(t(lang, "reset_water_done"))
     elif action == "all":
         keyboard = InlineKeyboardMarkup([
             [
                 InlineKeyboardButton(
-                    "Yes, delete everything",
+                    t(lang, "btn_yes_delete"),
                     callback_data=f"confirm_reset_all:{user_id}",
                 ),
                 InlineKeyboardButton(
-                    "Cancel",
+                    t(lang, "btn_cancel"),
                     callback_data=f"cancel_reset_all:{user_id}",
                 ),
             ]
         ])
         await update.message.reply_text(
-            "Are you sure? This will permanently delete ALL your data:\n"
-            "meals, water, profile, diet preferences, calorie limits, and weight history.\n\n"
-            "This cannot be undone.",
+            t(lang, "reset_all_confirm"),
             reply_markup=keyboard,
         )
     else:
@@ -1799,6 +2151,7 @@ async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def goal_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    lang = await get_lang(update, context)
     user_id = update.effective_user.id
     if not context.args:
         prefs = get_diet_prefs(user_id)
@@ -1812,7 +2165,7 @@ async def goal_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         ]])
         goal_desc = GOALS.get(current_goal, current_goal)
         await update.message.reply_text(
-            f"\U0001f3af Current goal: <b>{current_goal}</b> ({goal_desc})\nSelect a new goal:",
+            t(lang, "goal_current", goal=current_goal, desc=goal_desc),
             parse_mode="HTML",
             reply_markup=keyboard,
         )
@@ -1991,6 +2344,7 @@ def _format_day_block(day_data: dict) -> str:
 
 async def mealplan_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Generate a 7-day meal plan."""
+    lang = await get_lang(update, context)
     user_id = update.effective_user.id
 
     # Pre-flight checklist
@@ -2041,10 +2395,7 @@ async def mealplan_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
         return
 
-    await update.message.reply_text(
-        "\u2699\ufe0f Generating your 7-day meal plan...\n"
-        "This takes ~10 seconds (3 parallel AI calls + shopping list). Please wait."
-    )
+    await update.message.reply_text(t(lang, "mealplan_generating"))
 
     try:
         plan = await generate_meal_plan(targets, profile, prefs)
@@ -2358,19 +2709,21 @@ async def delmeal_inline_callback(update: Update, context: ContextTypes.DEFAULT_
         _, meal_id_str, owner_id_str = query.data.split(":")
         meal_id, owner_id = int(meal_id_str), int(owner_id_str)
     except (ValueError, AttributeError):
-        await query.answer("Invalid request.", show_alert=True)
+        lang_fb = context.user_data.get("lang", "en")
+        await query.answer(t(lang_fb, "btn_invalid"), show_alert=True)
         return
+    lang = context.user_data.get("lang", "en")
     if owner_id != user_id:
-        await query.answer("This button isn't for you.", show_alert=True)
+        await query.answer(t(lang, "btn_not_yours"), show_alert=True)
         return
     meal = get_meal_by_id(meal_id, user_id)
     if not meal:
-        await query.answer(f"Meal #{meal_id} not found (already deleted?).", show_alert=True)
+        await query.answer(t(lang, "delmeal_cb_not_found", id=meal_id), show_alert=True)
         return
     deleted = delete_meal_by_id(meal_id, user_id)
     if deleted:
         short_text = _truncate(meal["meal_text"], 30)
-        await query.answer(f"Deleted: {short_text}")
+        await query.answer(t(lang, "delmeal_cb_deleted_toast", name=short_text))
         try:
             new_keyboard = [
                 row for row in query.message.reply_markup.inline_keyboard
@@ -2381,7 +2734,7 @@ async def delmeal_inline_callback(update: Update, context: ContextTypes.DEFAULT_
             ]
             original = query.message.text or ""
             await query.edit_message_text(
-                text=original + f"\n\n\u2705 Deleted: {_html(short_text)}",
+                text=original + "\n\n" + t(lang, "delmeal_cb_deleted_edit", name=_html(short_text)),
                 reply_markup=InlineKeyboardMarkup(new_keyboard) if new_keyboard else None,
                 parse_mode="HTML",
             )
@@ -2404,11 +2757,42 @@ async def reset_all_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.answer("This button isn't for you.", show_alert=True)
         return
 
+    lang = context.user_data.get("lang", "en")
     if action_part == "confirm_reset_all":
         reset_all_data(user_id)
-        await query.edit_message_text("\u2705 All your data has been permanently deleted.")
+        await query.edit_message_text(t(lang, "reset_all_done"))
     else:
-        await query.edit_message_text("Reset cancelled. Your data is safe.")
+        await query.edit_message_text(t(lang, "reset_cancelled"))
+
+
+async def language_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show language selection buttons."""
+    lang = await get_lang(update, context)
+    user_id = update.effective_user.id
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton(t("en", "btn_lang_en"), callback_data=f"lang_set:en:{user_id}"),
+        InlineKeyboardButton(t("ru", "btn_lang_ru"), callback_data=f"lang_set:ru:{user_id}"),
+        InlineKeyboardButton(t("hy", "btn_lang_hy"), callback_data=f"lang_set:hy:{user_id}"),
+    ]])
+    await update.message.reply_text(t(lang, "language_choose"), reply_markup=keyboard)
+
+
+async def lang_set_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle language selection button."""
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    try:
+        _, new_lang, owner_str = query.data.split(":")
+        owner_id = int(owner_str)
+    except (ValueError, AttributeError):
+        return
+    if owner_id != user_id or new_lang not in SUPPORTED_LANGUAGES:
+        return
+    save_user_language(user_id, new_lang)
+    context.user_data["lang"] = new_lang
+    key = f"language_set_{new_lang}"
+    await query.edit_message_text(t(new_lang, key), parse_mode="HTML")
 
 
 async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2604,13 +2988,15 @@ async def goal_select_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         _, goal, owner_str = query.data.split(":")
         owner_id = int(owner_str)
     except (ValueError, AttributeError):
-        await query.answer("Invalid request.", show_alert=True)
+        lang_fb = context.user_data.get("lang", "en")
+        await query.answer(t(lang_fb, "btn_invalid"), show_alert=True)
         return
+    lang = context.user_data.get("lang", "en")
     if owner_id != user_id:
-        await query.answer("This button isn't for you.", show_alert=True)
+        await query.answer(t(lang, "btn_not_yours"), show_alert=True)
         return
     if goal not in GOALS:
-        await query.answer("Unknown goal.", show_alert=True)
+        await query.answer(t(lang, "btn_invalid"), show_alert=True)
         return
     update_diet_pref(user_id, goal=goal)
     keyboard = InlineKeyboardMarkup([[
@@ -2622,7 +3008,7 @@ async def goal_select_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     ]])
     goal_desc = GOALS.get(goal, goal)
     await query.edit_message_text(
-        f"\u2705 Goal updated: <b>{goal}</b> ({goal_desc})\nSelect a new goal:",
+        t(lang, "goal_updated", goal=goal, desc=goal_desc),
         parse_mode="HTML",
         reply_markup=keyboard,
     )
@@ -2669,30 +3055,27 @@ async def reset_action_callback(update: Update, context: ContextTypes.DEFAULT_TY
         _, action, owner_str = query.data.split(":")
         owner_id = int(owner_str)
     except (ValueError, AttributeError):
-        await query.answer("Invalid request.", show_alert=True)
+        lang_fb = context.user_data.get("lang", "en")
+        await query.answer(t(lang_fb, "btn_invalid"), show_alert=True)
         return
+    lang = context.user_data.get("lang", "en")
     if owner_id != user_id:
-        await query.answer("This button isn't for you.", show_alert=True)
+        await query.answer(t(lang, "btn_not_yours"), show_alert=True)
         return
     if action == "meals":
         reset_today_meals(user_id)
-        await query.edit_message_text("\u2705 Today's meal logs cleared.")
+        await query.edit_message_text(t(lang, "reset_meals_done"))
     elif action == "water":
         reset_today_water(user_id)
-        await query.edit_message_text("\u2705 Today's water logs cleared.")
+        await query.edit_message_text(t(lang, "reset_water_done"))
     elif action == "all":
         keyboard = InlineKeyboardMarkup([[
-            InlineKeyboardButton("Yes, delete everything", callback_data=f"confirm_reset_all:{user_id}"),
-            InlineKeyboardButton("Cancel",                 callback_data=f"cancel_reset_all:{user_id}"),
+            InlineKeyboardButton(t(lang, "btn_yes_delete"), callback_data=f"confirm_reset_all:{user_id}"),
+            InlineKeyboardButton(t(lang, "btn_cancel"),     callback_data=f"cancel_reset_all:{user_id}"),
         ]])
-        await query.edit_message_text(
-            "Are you sure? This will permanently delete ALL your data:\n"
-            "meals, water, profile, diet preferences, calorie limits, and weight history.\n\n"
-            "This cannot be undone.",
-            reply_markup=keyboard,
-        )
+        await query.edit_message_text(t(lang, "reset_all_confirm"), reply_markup=keyboard)
     else:
-        await query.answer("Unknown action.", show_alert=True)
+        await query.answer(t(lang, "btn_invalid"), show_alert=True)
 
 
 async def history_nav_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2759,17 +3142,19 @@ async def water_quick_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         owner_id = int(owner_str)
         chat_id  = int(chat_id_str)
     except (ValueError, AttributeError):
-        await query.answer("Invalid request.", show_alert=True)
+        lang2 = context.user_data.get("lang", "en")
+        await query.answer(t(lang2, "btn_invalid"), show_alert=True)
         return
+    lang = context.user_data.get("lang", "en")
     if owner_id != user_id:
-        await query.answer("This button isn't for you.", show_alert=True)
+        await query.answer(t(lang, "btn_not_yours"), show_alert=True)
         return
     user = update.effective_user
     save_water(user.id, user.username or user.first_name, chat_id, amount)
-    status = _build_water_status_text(user.id)
+    status = _build_water_status_text(user.id, lang)
     await query.edit_message_text(
-        f"\u2705 Logged {amount}ml!\n{status}",
-        reply_markup=_water_quick_keyboard(user.id, chat_id),
+        t(lang, "water_quick_logged", amount=amount, status=status),
+        reply_markup=_water_quick_keyboard(user.id, chat_id, lang),
     )
 
 
@@ -2783,14 +3168,11 @@ async def handle_meal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if not meal_text:
         return
 
-    # --- Intent guard: ignore non-food chatter ---
-    if not _looks_like_food(meal_text):
-        await update.message.reply_text(
-            "I track food and calories. Send me a meal description like:\n"
-            "  chicken salad with rice\n"
-            "  2 eggs, toast\n\n"
-            "Type /help to see all commands."
-        )
+    lang = await get_lang(update, context)
+
+    # --- Intent guard: ignore non-food chatter (English-only heuristics) ---
+    if lang == "en" and not _looks_like_food(meal_text):
+        await update.message.reply_text(t(lang, "not_food"))
         return
 
     # --- Clarification flow ---
@@ -2798,8 +3180,8 @@ async def handle_meal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         # User answered our clarification question — combine and process
         original = context.user_data.pop("pending_meal")
         meal_text = f"{original} ({meal_text})"
-    elif _needs_clarification(meal_text):
-        # Too vague — ask for more detail before calling AI
+    elif lang == "en" and _needs_clarification(meal_text):
+        # Too vague — ask for more detail before calling AI (English only)
         context.user_data["pending_meal"] = meal_text
         await update.message.reply_text(
             _get_clarification_question(meal_text),
@@ -2819,27 +3201,28 @@ async def handle_meal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                   calories, protein, fat, carbs)
         today = get_today_totals(user.id)
         targets = get_targets(user.id)
-        reply, parse_mode = format_reply(data, today, targets)
+        reply, parse_mode = format_reply(data, today, targets, lang)
     except json.JSONDecodeError:
         logger.exception("Failed to parse Groq response")
-        reply = "Sorry, I couldn't parse the calorie data. Try rephrasing your meal."
+        reply = t(lang, "meal_parse_error")
         parse_mode = ""
     except Exception:
         logger.exception("Error estimating calories")
-        reply = "Something went wrong. Please try again in a moment."
+        reply = t(lang, "meal_error")
         parse_mode = ""
 
     water_kb = None
     if parse_mode == "HTML":
         water_kb = InlineKeyboardMarkup([[
-            InlineKeyboardButton("\U0001f4a7 250ml", callback_data=f"water_quick:250:{user.id}:{update.effective_chat.id}"),
-            InlineKeyboardButton("\U0001f4a7 500ml", callback_data=f"water_quick:500:{user.id}:{update.effective_chat.id}"),
+            InlineKeyboardButton(t(lang, "btn_water", ml=250), callback_data=f"water_quick:250:{user.id}:{update.effective_chat.id}"),
+            InlineKeyboardButton(t(lang, "btn_water", ml=500), callback_data=f"water_quick:500:{user.id}:{update.effective_chat.id}"),
         ]])
     await update.message.reply_text(reply, parse_mode=parse_mode or None, reply_markup=water_kb)
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle a photo message as a meal photo."""
+    lang = await get_lang(update, context)
     photo = update.message.photo[-1]
     caption = update.message.caption or ""
 
@@ -2858,21 +3241,21 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                   calories, protein, fat, carbs)
         today = get_today_totals(user.id)
         targets = get_targets(user.id)
-        reply, parse_mode = format_reply(data, today, targets)
+        reply, parse_mode = format_reply(data, today, targets, lang)
     except json.JSONDecodeError:
         logger.exception("Failed to parse Groq vision response")
-        reply = "Sorry, I couldn't identify the food in this photo. Try adding a caption describing the meal."
+        reply = t(lang, "photo_parse_error")
         parse_mode = ""
     except Exception:
         logger.exception("Error estimating calories from photo")
-        reply = "Something went wrong analyzing the photo. Please try again."
+        reply = t(lang, "photo_error")
         parse_mode = ""
 
     water_kb = None
     if parse_mode == "HTML":
         water_kb = InlineKeyboardMarkup([[
-            InlineKeyboardButton("\U0001f4a7 250ml", callback_data=f"water_quick:250:{user.id}:{update.effective_chat.id}"),
-            InlineKeyboardButton("\U0001f4a7 500ml", callback_data=f"water_quick:500:{user.id}:{update.effective_chat.id}"),
+            InlineKeyboardButton(t(lang, "btn_water", ml=250), callback_data=f"water_quick:250:{user.id}:{update.effective_chat.id}"),
+            InlineKeyboardButton(t(lang, "btn_water", ml=500), callback_data=f"water_quick:500:{user.id}:{update.effective_chat.id}"),
         ]])
     await update.message.reply_text(reply, parse_mode=parse_mode or None, reply_markup=water_kb)
 
@@ -2938,6 +3321,7 @@ def main() -> None:
             BotCommand("weight", "Log weight or view history"),
             BotCommand("export", "Export meals and water as CSV files"),
             BotCommand("timezone", "Set your timezone for local time display"),
+            BotCommand("language", "Change language / \u042f\u0437\u044b\u043a / \u053c\u0587\u0566\u0578\u0582"),
         ]
         await application.bot.set_my_commands(commands, scope=BotCommandScopeDefault())
         await application.bot.set_my_commands(commands, scope=BotCommandScopeAllGroupChats())
@@ -2985,6 +3369,8 @@ def main() -> None:
     app.add_handler(CommandHandler("history", history_command))
     app.add_handler(CommandHandler("stats", stats_command))
     app.add_handler(CommandHandler("weight", weight_command))
+    app.add_handler(CommandHandler("language", language_command))
+    app.add_handler(CallbackQueryHandler(lang_set_callback, pattern=r"^lang_set:[a-z]+:\d+$"))
     app.add_handler(CommandHandler("export", export_command))
     app.add_handler(CommandHandler("timezone", timezone_command))
 

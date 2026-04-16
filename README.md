@@ -1,196 +1,238 @@
-# Calorie Bot
+# Calorie Bot - Agent Instructions
 
-A Telegram bot that estimates calories and macronutrients (protein, fat, carbs)
-from meal descriptions or photos using AI. Features personalized daily targets
-based on user measurements, daily/weekly tracking, water intake logging, and
-scheduled water reminders.
+## Project Overview
+A Telegram bot that estimates meal calories and macronutrients (protein, fat,
+carbs) using AI (Groq/Llama), tracks daily intake per user with personalized
+targets based on body measurements, enforces configurable calorie/macro limits,
+logs water intake, and sends scheduled water reminders. Supports both text
+descriptions and meal photos.
 
-## Prerequisites
+## Tech Stack
+- **Language:** Python 3.9+
+- **Telegram SDK:** `python-telegram-bot` v20+ (async, webhook mode with job-queue)
+- **AI — meal text:** Groq `llama-3.3-70b-versatile` (temp 0.3)
+- **AI — meal photo:** Groq `meta-llama/llama-4-scout-17b-16e-instruct` (temp 0.3)
+- **AI — meal plan days:** Groq `meta-llama/llama-4-maverick-17b-128e-instruct` (temp 0.5)
+- **AI — shopping list:** Groq `llama-3.1-8b-instant` (temp 0.3, simpler task)
+- **TDEE/BMR:** Pure Python — Mifflin-St Jeor + Harris-Benedict (revised) + optional Katch-McArdle (no API call)
+- **Timezone:** `timezonefinder` (offline lat/lon → IANA name) + `zoneinfo` stdlib (UTC offset display)
+- **Parallelism:** `asyncio.gather` + `asyncio.to_thread` for concurrent meal plan day generation
+- **Database:** PostgreSQL via Supabase (free hosted, persistent)
+- **Hosting:** Render (web service, webhook-based)
+- **Image processing:** Pillow (resize photos >800 KB before Groq upload)
 
-1. Create a Telegram bot via [@BotFather](https://t.me/BotFather) and save the token.
-2. Get a free Groq API key from [console.groq.com](https://console.groq.com).
-3. Create a free [Supabase](https://supabase.com) project and copy the database connection string.
+## Project Structure
+```
+bot.py              # Single-file application (all logic)
+requirements.txt    # Python dependencies
+render.yaml         # Render deployment blueprint
+.env.example        # Required environment variables
+README.md           # User-facing documentation
+AGENTS.md           # This file
+```
 
-## Local Development
+## Architecture
+All logic lives in `bot.py` as a single-file application. There is no module
+structure. The file is organized into these sections:
 
+1. **Config & constants** - env vars, defaults, system/vision/profile prompts, water schedule
+2. **Database helpers** - `db_connect()`, `db_init()`, CRUD functions for meals,
+   water, limits, profiles, diet_prefs, meal_plans, and reminder_chats tables. Includes migration logic
+   for adding macro columns to older databases.
+3. **AI helpers** - `estimate_calories()`, `estimate_calories_from_photo()`,
+   `calculate_recommendations()`, `generate_meal_plan()`, `scale_macros()`,
+   `compute_streak()`, `resize_image_if_needed()`, `_parse_ai_json()`, `format_reply()`
+4. **Command handlers** - async functions for `/start`, `/help`, `/profile`,
+   `/myprofile`, `/macros`, `/today`, `/week`, `/history`, `/delmeal`, `/stats`,
+   `/setlimit`, `/limit`, `/water`, `/watertoday`, `/reminders`, `/weight`,
+   `/reset`, `/goal`, `/schedule`, `/exclude`, `/budget`, `/mealplan`, `/shoplist`,
+   `/diet`, plus `reset_all_callback` (inline keyboard handler)
+5. **Meal handler** - `handle_meal()` processes any non-command text message
+6. **Photo handler** - `handle_photo()` downloads the photo, sends to vision model
+7. **Water reminder job** - `send_water_reminder()` runs on a daily schedule
+8. **Main** - wires handlers, registers scheduled jobs, starts webhook or polling
+
+## Database Schema
+Eight tables in PostgreSQL (Supabase):
+
+- **meals** - `id` (PK), `user_id`, `username`, `chat_id`, `meal_text`, `calories`, `protein_g`, `fat_g`, `carbs_g`, `created_at`
+- **limits** - `user_id` (PK), `daily_limit`, `daily_protein_g`, `daily_fat_g`, `daily_carbs_g`
+- **profiles** - `user_id` (PK), `height_cm`, `weight_kg`, `age`, `gender`, `activity`, `rec_calories`, `rec_protein_g`, `rec_fat_g`, `rec_carbs_g`
+- **water** - `id` (PK), `user_id`, `username`, `chat_id`, `amount_ml`, `created_at`
+- **reminder_chats** - `chat_id` (PK)
+- **diet_prefs** - `user_id` (PK), `goal`, `schedule` (JSON), `excludes` (JSON), `budget_amount`, `budget_currency`
+- **meal_plans** - `user_id` (PK), `week_start`, `plan_json`, `shoplist_json`, `created_at`
+- **weight_history** - `id` (PK), `user_id`, `weight_kg`, `recorded_at`
+
+All timestamps are ISO 8601 UTC. Day boundaries are midnight UTC.
+
+## Environment Variables
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `TELEGRAM_BOT_TOKEN` | Yes | Bot token from BotFather |
+| `GROQ_API_KEY` | Yes | API key from console.groq.com |
+| `WEBHOOK_URL` | Yes (prod) | Public URL assigned by Render |
+| `PORT` | No | Defaults to 10000; Render sets automatically |
+| `DATABASE_URL` | Yes | PostgreSQL connection string from Supabase |
+
+## Key Behaviors
+- Every non-command text message is treated as a meal description and sent to the
+  AI for calorie and macro estimation.
+- Photo messages are analyzed using Groq's vision model
+  (`meta-llama/llama-4-scout-17b-16e-instruct`) to identify food items and
+  estimate calories/macros. Captions are passed as extra context. Photos >800 KB
+  are resized to 1024px / quality-reduced before base64 encoding via `resize_image_if_needed()`.
+- The AI returns JSON with per-item calories, macros (P/F/C), portion sizes, and
+  per-100g values for both raw and cooked.
+- Each meal reply includes the user's daily running total for calories and macros
+  vs. their targets.
+- Users are identified by Telegram numeric `user_id`. Each user's data is independent.
+- `/profile` computes TDEE via `calculate_recommendations()` (pure Python, no API call)
+  using the average of Mifflin-St Jeor and Harris-Benedict (revised). If a 6th arg
+  `body_fat%` is provided, Katch-McArdle is also included in the average. Results are
+  applied immediately via `set_targets()`. Profile response shows per-formula BMR breakdown.
+- `PROFILE_PROMPT` has been removed — TDEE is now deterministic Python math.
+- Users can update weight alone with `/weight <kg>` without re-running `/profile`.
+  Weight is logged to `weight_history`; daily water target updates automatically.
+- Water daily target is weight-based: `min(weight_kg * 35, 3500)` ml when profile
+  exists, otherwise falls back to 2000 ml constant. Computed by `get_water_target()`.
+- When `/setlimit` changes the calorie target, macro targets are scaled
+  proportionally based on the original AI recommendations from the profile.
+- Water reminders are sent at 11:00, 14:00, 16:00, 18:00, 20:00 UTC to chats
+  that have opted in via `/reminders on`.
+- `/reset all` shows an inline keyboard confirmation (2 buttons) before deleting.
+  `callback_data` encodes the owner's `user_id` to prevent cross-user abuse in groups.
+- `DIET_PREF_COLUMNS` frozenset allowlists column names in `update_diet_pref()` to
+  prevent SQL injection from crafted kwargs.
+- Non-food text is filtered by `_looks_like_food()` before calling Groq. Short food
+  descriptions (1–3 words, no quantity/cooking method) trigger `_needs_clarification()`,
+  which sends a specific question and stores the original text in `context.user_data["pending_meal"]`.
+  The next message combines both and calls the AI.
+- `_truncate(text, limit=40)` appends `…` when meal text is cut in `/today`, `/history`, `/delmeal`.
+- `/today` uses inline keyboard buttons (one per meal) for one-tap deletion via
+  `delmeal_inline_callback`. Callback pattern: `delmeal_inline:<meal_id>:<user_id>`.
+- `/mealplan` uses a pre-flight checklist (✅/❌ per requirement) before generating,
+  and sends output as 3 messages (Mon-Wed, Thu-Sun, Shopping list) via `_format_day_block()`.
+- `/diet` shows action hints for missing fields (e.g., "not set → /schedule ...").
+- `/help` sends a compact quick-start (`_HELP_QUICK_START` constant) by default;
+  `/help full` sends the full reference as a second message.
+- **Multi-language support (EN/RU/HY):** `TRANSLATIONS` dict + `t(lang, key, **kwargs)` helper.
+  `get_lang(update, context)` resolves language: session cache (`context.user_data["lang"]`) →
+  DB (`profiles.language`) → Telegram `language_code` auto-detection → default "en".
+  `/language` command shows 3 flag buttons; `lang_set_callback` saves to DB + session cache.
+  `profiles.language TEXT DEFAULT 'en'` added via `ALTER TABLE IF NOT EXISTS`.
+  Non-English users skip English food-intent guard and clarification flow (Groq handles multilingual input).
+  `format_reply`, `_build_water_status_text`, `_water_quick_keyboard` all accept `lang` parameter.
+- `/start` shows numbered onboarding steps with a "Quick Start Guide" inline button
+  handled by `help_quickstart_callback()`.
+- `/reminders` (no arg) shows current ON/OFF status + Turn On/Turn Off buttons;
+  `reminders_toggle_callback` toggles and edits the message in-place. No owner_id
+  check — reminders are chat-scoped, any member can toggle.
+- `/water` (no arg) and `/watertoday` show a 2×2 quick-log keyboard (250/500/750/1000ml)
+  via `_water_quick_keyboard(user_id, chat_id)`. After `/water <amount>` succeeds,
+  the same keyboard is appended. `water_quick_callback` logs and edits in-place.
+- After any meal is logged (text or photo), a 2-button water keyboard (250/500ml)
+  is appended to the reply, reusing `water_quick_callback`.
+- `/goal` (no arg) shows 3 goal buttons with current goal marked ✓;
+  `goal_select_callback` updates and edits the message.
+- `/reset` (no arg) shows 3 buttons (Meals / Water / Everything); Everything
+  leads to the existing confirm/cancel dialog via `reset_action_callback`.
+- `generate_meal_plan` is `async def`; 3 day-group Groq calls run concurrently via
+  `asyncio.gather(asyncio.to_thread(...) × 3)`; shopping list call remains sequential.
+  `mealplan_command` uses `await generate_meal_plan(...)`. Cuts ~30s → ~10s.
+- `_groq_with_retry(func, **kwargs)` wraps all 4 Groq call sites; catches
+  `GroqRateLimitError`, sleeps 2s (`_stdlib_time.sleep`), retries once, re-raises on second failure.
+- `_MEAL_CACHE` dict (max 200 entries, FIFO eviction) caches `estimate_calories` results
+  by normalized meal text. Photos and mealplan calls are not cached.
+- `/export [days]` sends two CSV files (meals + water) via `reply_document`. Uses
+  stdlib `csv` + `io.StringIO`/`io.BytesIO`. Default 30 days, max 365.
+- `/timezone` command: no-arg shows `ReplyKeyboardMarkup` with location share button;
+  arg can be IANA name (`Europe/Berlin`) or UTC offset (`UTC+3`). Saves to
+  `profiles.user_timezone` (TEXT column, added via `ALTER TABLE IF NOT EXISTS`).
+- `handle_location` uses `_tf.timezone_at(lat, lng)` (`TimezoneFinder` singleton)
+  → IANA name → `save_user_timezone()`. Sends `ReplyKeyboardRemove()` on all paths.
+- `get_user_timezone(user_id)` returns `ZoneInfo` or `timezone.utc` (fallback).
+- `_format_time_in_tz(hour, minute, tz)` converts UTC schedule times to local display.
+- `/reminders` (all paths) now shows schedule in local time via `_format_time_in_tz`.
+- `handle_location` registered **before** TEXT catch-all in `main()`.
+- `/history` now includes ⬅️/➡️ day navigation buttons; `history_nav_callback`
+  fetches the new day's meals and edits the message in-place.
+- Callback data patterns: all embed user_id for ownership checks; chat_id uses
+  `-?\d+` to handle negative group chat IDs. All patterns under 44 chars (64-byte limit).
+- Meal estimation responses use Telegram HTML parse mode (`parse_mode="HTML"`). All
+  user-supplied text in replies is escaped via `_html()`. `format_reply()` returns
+  `(text, parse_mode)` tuple. Progress bars rendered via `_progress_bar()`.
+- Meal calorie estimates now include `fiber_g`, `confidence` (high/medium/low), and
+  `context_hint` (home_cooked/restaurant/branded/unknown) from the AI response.
+  Restaurant meals prompt the model to assume 20-30% larger portions.
+- After meal plan generation, `_validate_meal_plan_macros()` checks each day against
+  ±5% calorie and ±10% protein tolerances; logs warnings, notifies user if >10% off.
+- `/help` shows all commands organized by category with inline usage examples.
+
+## Bot Commands Reference
+| Command | Description | Example |
+|---------|-------------|---------|
+| *(plain text)* | Estimate calories and macros for a meal | `chicken salad with rice` |
+| *(photo)* | Estimate from a meal photo | Send a photo, optionally with caption |
+| `/start` | Welcome message | `/start` |
+| `/help` | Full command list with examples | `/help` |
+| `/profile <h> <w> <age> <gender> <activity> [bf%]` | Compute TDEE (multi-formula), auto-apply targets | `/profile 180 75 28 male moderate` or `/profile 180 75 28 male moderate 18` |
+| `/myprofile` | Show profile and daily targets | `/myprofile` |
+| `/macros` | Today's macro progress (P/F/C) | `/macros` |
+| `/today` | Today's meals with IDs, calories, and macros | `/today` |
+| `/week` | 7-day calorie and macro summary | `/week` |
+| `/history [YYYY-MM-DD]` | Meals for a past date (default: yesterday) | `/history 2025-04-10` |
+| `/delmeal <id>` | Delete a specific logged meal by ID | `/delmeal 42` |
+| `/stats` | Logging streaks and 30-day statistics | `/stats` |
+| `/setlimit <kcal>` | Override calorie limit; macros scale proportionally | `/setlimit 2200` |
+| `/limit` | Show current calorie limit and macro targets | `/limit` |
+| `/water <ml>` | Log water intake | `/water 500` |
+| `/watertoday` | Today's water total vs personal target | `/watertoday` |
+| `/reminders on/off` | Toggle water reminders for this chat | `/reminders on` |
+| `/weight <kg>` | Update weight and log to history | `/weight 74.5` |
+| `/weight` | Show weight history | `/weight` |
+| `/reset meals` | Clear today's meal logs | `/reset meals` |
+| `/reset water` | Clear today's water logs | `/reset water` |
+| `/reset all` | Delete all user data (with inline confirmation) | `/reset all` |
+| `/goal <goal>` | Set fitness goal | `/goal lose_weight` |
+| `/schedule <meal time>, ...` | Set eating schedule | `/schedule breakfast 8:00, lunch 13:00` |
+| `/exclude <foods>` | Set foods to avoid | `/exclude pork, shellfish` |
+| `/budget <amount> <currency>` | Set weekly food budget | `/budget 80 EUR` |
+| `/mealplan` | Generate 7-day meal plan with shopping list | `/mealplan` |
+| `/shoplist` | Re-show last shopping list | `/shoplist` |
+| `/diet` | Show current diet preferences | `/diet` |
+
+## Running Locally
 ```bash
 pip install -r requirements.txt
-
-export TELEGRAM_BOT_TOKEN="your-token"
-export GROQ_API_KEY="your-key"
-export DATABASE_URL="postgresql://postgres:password@db.xxxxx.supabase.co:5432/postgres"
-
-# Run in polling mode (no webhook needed locally)
+export TELEGRAM_BOT_TOKEN="..."
+export GROQ_API_KEY="..."
 python bot.py --poll
 ```
+The `--poll` flag uses long polling instead of webhooks (no public URL needed).
 
-## Deploy to Render
+## Deployment
+Push to GitHub. Render auto-deploys from the connected repo. Env vars are set in
+the Render dashboard under Environment. The bot registers its Telegram webhook
+automatically on startup.
 
-1. Push this repo to GitHub.
-2. Go to [render.com](https://render.com) > **New** > **Web Service**.
-3. Connect your GitHub repo.
-4. Set **Build Command** to `pip install -r requirements.txt`.
-5. Set **Start Command** to `python bot.py`.
-6. Add environment variables under **Environment**:
-   - `TELEGRAM_BOT_TOKEN` - your bot token from BotFather
-   - `GROQ_API_KEY` - your Groq API key
-   - `DATABASE_URL` - your Supabase PostgreSQL connection string
-   - `WEBHOOK_URL` - the URL Render assigns (e.g. `https://calorie-bot.onrender.com`)
-7. Click **Deploy**.
+## Common Pitfalls
+- **Group privacy:** BotFather's Group Privacy must be turned OFF for the bot to
+  see non-command messages in group chats.
+- **Render free tier:** The service spins down after 15 min idle (~30s cold start).
+  Use UptimeRobot to keep it alive. Data persists in Supabase across redeploys.
+- **Groq rate limits:** Free tier allows 30 req/min. No retry logic is implemented;
+  errors are caught and a fallback message is sent to the user.
 
-## Usage
-
-Send any meal description to the bot (DM or group chat), or send a photo of your meal:
-
-```
-2 scrambled eggs, toast with butter, black coffee
-```
-
-You can also send a **photo** of your meal. Add a caption for better accuracy
-(e.g. "about 200g of pasta with sauce").
-
-If your description is vague (e.g. just "egg"), the bot will ask for more detail before estimating — cooking method, quantity, preparation.
-
-The bot replies with calories, macros, fiber, confidence indicator, per-100g values, and daily progress with visual progress bars (HTML-formatted):
-
-```
-🍽 Calorie Estimate:
-- Scrambled eggs (2 large, 100g): ~182 kcal
-  P: 12g | F: 14g | C: 2g
-  per 100g: 143 raw / 182 cooked
-- Toast with butter (50g): ~178 kcal
-  P: 4g | F: 9g | C: 21g
-  per 100g: 265 raw / 265 cooked
-
-Total: ~360 kcal | P: 16g | F: 23g | C: 23g
-📊 Today: 360 / 2100 kcal (1740 remaining)
-   P: 16/150g | F: 23/65g | C: 23/250g
-```
-
-## Commands
-
-### Profile
-- `/profile <height_cm> <weight_kg> <age> <gender> <activity> [body_fat%]` - Compute TDEE and auto-apply targets
-  - Uses Mifflin-St Jeor + Harris-Benedict averaged; add body fat % for Katch-McArdle (most accurate)
-  - Response shows per-formula BMR breakdown
-  - Activity levels: `sedentary`, `light`, `moderate`, `active`, `very_active`
-- `/myprofile` - Show your profile and daily targets
-- `/macros` - Show today's macro progress (P/F/C)
-- `/weight <kg>` - Update your weight quickly (e.g. `/weight 74.5`)
-- `/weight` - Show weight history
-- `/timezone` - Auto-detect timezone via location share, or set manually (`/timezone Europe/Berlin`, `/timezone UTC+3`)
-- `/export [days]` - Export meal and water logs as CSV files (default: 30 days)
-
-### Calories
-- `/today` - Show today's meals with inline delete buttons (tap to remove a meal)
-- `/week` - 7-day calorie summary
-- `/history [YYYY-MM-DD]` - View meals for a date (defaults to today); includes ⬅️/➡️ day navigation buttons
-- `/delmeal <id>` - Delete a specific logged meal by ID
-- `/stats` - Logging streaks and 30-day statistics
-- `/setlimit <kcal>` - Override daily calorie limit (macros scale proportionally)
-- `/limit` - Show your current limit
-
-### Water
-- `/water <ml>` - Log water intake (e.g. `/water 500`); reply includes quick-add buttons
-- `/water` - No arg: shows today's progress + 250/500/750/1000ml tap-to-log buttons
-- `/watertoday` - Today's water intake with quick-add buttons
-- `/reminders` - No arg: shows current ON/OFF status with toggle buttons
-- `/reminders on` / `/reminders off` - Enable or disable water reminders via text command
-
-### Water Reminder Schedule (UTC)
-| Time  | Amount |
-|-------|--------|
-| 11:00 | 500ml  |
-| 14:00 | 500ml  |
-| 16:00 | 250ml  |
-| 18:00 | 500ml  |
-| 20:00 | 250ml  |
-
-Daily target: weight-based (~35 ml/kg, capped at 3500 ml) when profile is set, otherwise 2000 ml.
-
-### Reset
-- `/reset meals` - Clear today's meal logs
-- `/reset water` - Clear today's water logs
-- `/reset all` - Delete all your data (asks for confirmation via inline button)
-
-### Diet Planning
-- `/goal` - No arg: shows current goal with 3 tap-to-select buttons (Lose Weight / Maintain / Gain Muscle)
-- `/goal <lose_weight|maintain|gain_muscle>` - Set goal via text command
-- `/schedule <meal time>, ...` - Set eating schedule (e.g. `/schedule breakfast 8:00, lunch 13:00, dinner 19:00`)
-- `/exclude <foods>` - Set foods to avoid (e.g. `/exclude pork, shellfish`). Use `/exclude clear` to reset.
-- `/budget <amount> <currency>` - Set weekly food budget (e.g. `/budget 80 EUR`)
-- `/mealplan` - Generate a 7-day meal plan with shopping list
-- `/shoplist` - Re-show last shopping list
-- `/diet` - Show current diet preferences
-
-### Examples
-
-**Set diet preferences:**
-```
-/goal lose_weight
-/schedule breakfast 8:00, lunch 13:00, snack 16:00, dinner 19:00
-/exclude pork, shellfish, peanuts
-/budget 80 EUR
-```
-
-**Generate a weekly meal plan:**
-```
-/mealplan
-```
-
-**Set up your profile:**
-```
-/profile 180 75 28 male moderate
-/profile 180 75 28 male moderate 18    (with body fat % — adds Katch-McArdle formula)
-```
-
-**Log a meal** (just type it):
-```
-chicken salad with rice
-2 eggs, toast with butter, black coffee
-big mac, medium fries, diet coke
-```
-
-**Log a meal by photo:**
-Send a photo of your meal. Optionally add a caption like "about 200g of pasta" for better accuracy.
-
-**Override calorie limit (macros scale):**
-```
-/setlimit 2200
-```
-
-**Log water:**
-```
-/water 500
-```
-
-**Check daily progress:**
-```
-/today
-/watertoday
-/macros
-```
-
-**Weekly summary:**
-```
-/week
-```
-
-**Enable water reminders in a group:**
-```
-/reminders on
-```
-
-**Reset today's data:**
-```
-/reset meals
-/reset water
-```
-
-## Notes
-
-- Render free tier spins down after 15 min of inactivity. First message after idle has a ~30s cold start.
-- In group chats, turn off Group Privacy via BotFather so the bot sees all messages.
-- Data is stored in Supabase PostgreSQL. Persists across redeploys.
-- Set your profile first with `/profile` for personalized calorie and macro recommendations.
-- Activity levels: sedentary (no exercise), light (1-3 days/week), moderate (3-5 days/week), active (6-7 days/week), very_active (hard daily exercise or physical job).
+## Extending the Bot
+- To add a new command: write an async handler function, register it with
+  `app.add_handler(CommandHandler("name", handler))` in `main()` before the
+  `MessageHandler` (which must stay last).
+- To add a new DB table: add the CREATE TABLE statement in `db_init()`.
+- To change the AI provider: modify `estimate_calories()` and update
+  `requirements.txt`. The rest of the code only depends on the returned JSON shape.
+- The AI JSON schema includes macros (`protein_g`, `fat_g`, `carbs_g`,
+  `total_protein_g`, `total_fat_g`, `total_carbs_g`) alongside calories.
+  Any provider change must preserve this schema.
+- Database uses `psycopg2` with a `db_query()` helper that handles connections,
+  cursors, and cleanup. All queries use `%s` parameter style.
