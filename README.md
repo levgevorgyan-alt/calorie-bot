@@ -49,7 +49,7 @@ Send any meal description to the bot (DM or group chat), or send a photo of your
 You can also send a **photo** of your meal. Add a caption for better accuracy
 (e.g. "about 200g of pasta with sauce").
 
-The bot replies with calories, macros, per-100g values, and daily progress:
+The bot replies with calories, macros, fiber, confidence indicator, per-100g values, and daily progress with visual progress bars (HTML-formatted):
 
 ```
 🍽 Calorie Estimate:
@@ -68,20 +68,27 @@ Total: ~360 kcal | P: 16g | F: 23g | C: 23g
 ## Commands
 
 ### Profile
-- `/profile <height_cm> <weight_kg> <age> <gender> <activity>` - Set measurements for personalized targets
-  Activity levels: `sedentary`, `light`, `moderate`, `active`, `very_active`
+- `/profile <height_cm> <weight_kg> <age> <gender> <activity> [body_fat%]` - Compute TDEE and auto-apply targets
+  - Uses Mifflin-St Jeor + Harris-Benedict averaged; add body fat % for Katch-McArdle (most accurate)
+  - Response shows per-formula BMR breakdown
+  - Activity levels: `sedentary`, `light`, `moderate`, `active`, `very_active`
 - `/myprofile` - Show your profile and daily targets
 - `/macros` - Show today's macro progress (P/F/C)
+- `/weight <kg>` - Update your weight quickly (e.g. `/weight 74.5`)
+- `/weight` - Show weight history
 
 ### Calories
-- `/today` - Show today's meals and calorie total
+- `/today` - Show today's meals and calorie total (includes meal IDs for `/delmeal`)
 - `/week` - 7-day calorie summary
+- `/history [YYYY-MM-DD]` - View meals for a past date (defaults to yesterday)
+- `/delmeal <id>` - Delete a specific logged meal by ID
+- `/stats` - Logging streaks and 30-day statistics
 - `/setlimit <kcal>` - Override daily calorie limit (macros scale proportionally)
 - `/limit` - Show your current limit
 
 ### Water
 - `/water <ml>` - Log water intake (e.g. `/water 500`)
-- `/watertoday` - Show today's water intake
+- `/watertoday` - Show today's water intake vs your personal target
 - `/reminders on` - Enable water reminders in this chat
 - `/reminders off` - Disable water reminders
 
@@ -94,12 +101,12 @@ Total: ~360 kcal | P: 16g | F: 23g | C: 23g
 | 18:00 | 500ml  |
 | 20:00 | 250ml  |
 
-Daily target: 2000ml
+Daily target: weight-based (~35 ml/kg, capped at 3500 ml) when profile is set, otherwise 2000 ml.
 
 ### Reset
 - `/reset meals` - Clear today's meal logs
 - `/reset water` - Clear today's water logs
-- `/reset all` - Delete all your data (meals, water, profile, diet, limits)
+- `/reset all` - Delete all your data (asks for confirmation via inline button)
 
 ### Diet Planning
 - `/goal <lose_weight|maintain|gain_muscle>` - Set your fitness goal
@@ -128,6 +135,7 @@ Daily target: 2000ml
 **Set up your profile:**
 ```
 /profile 180 75 28 male moderate
+/profile 180 75 28 male moderate 18    (with body fat % — adds Katch-McArdle formula)
 ```
 
 **Log a meal** (just type it):
