@@ -116,6 +116,22 @@ All timestamps are ISO 8601 UTC. Day boundaries are midnight UTC.
   `/help full` sends the full reference as a second message.
 - `/start` shows numbered onboarding steps with a "Quick Start Guide" inline button
   handled by `help_quickstart_callback()`.
+- `/reminders` (no arg) shows current ON/OFF status + Turn On/Turn Off buttons;
+  `reminders_toggle_callback` toggles and edits the message in-place. No owner_id
+  check — reminders are chat-scoped, any member can toggle.
+- `/water` (no arg) and `/watertoday` show a 2×2 quick-log keyboard (250/500/750/1000ml)
+  via `_water_quick_keyboard(user_id, chat_id)`. After `/water <amount>` succeeds,
+  the same keyboard is appended. `water_quick_callback` logs and edits in-place.
+- After any meal is logged (text or photo), a 2-button water keyboard (250/500ml)
+  is appended to the reply, reusing `water_quick_callback`.
+- `/goal` (no arg) shows 3 goal buttons with current goal marked ✓;
+  `goal_select_callback` updates and edits the message.
+- `/reset` (no arg) shows 3 buttons (Meals / Water / Everything); Everything
+  leads to the existing confirm/cancel dialog via `reset_action_callback`.
+- `/history` now includes ⬅️/➡️ day navigation buttons; `history_nav_callback`
+  fetches the new day's meals and edits the message in-place.
+- Callback data patterns: all embed user_id for ownership checks; chat_id uses
+  `-?\d+` to handle negative group chat IDs. All patterns under 44 chars (64-byte limit).
 - Meal estimation responses use Telegram HTML parse mode (`parse_mode="HTML"`). All
   user-supplied text in replies is escaped via `_html()`. `format_reply()` returns
   `(text, parse_mode)` tuple. Progress bars rendered via `_progress_bar()`.
