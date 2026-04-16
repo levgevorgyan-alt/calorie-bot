@@ -79,6 +79,8 @@ Total: ~360 kcal | P: 16g | F: 23g | C: 23g
 - `/weight <kg>` - Update your weight quickly (e.g. `/weight 74.5`)
 - `/weight` - Show weight history
 - `/language` - Change language: 🇬🇧 English / 🇷🇺 Русский (auto-detected from Telegram settings)
+- `/premium` - View your subscription status ⭐
+- `/upgrade` - Subscribe to Premium for 299 ⭐/month (auto-renewing via Telegram Stars)
 - `/timezone` - Auto-detect timezone via location share, or set manually (`/timezone Europe/Berlin`, `/timezone UTC+3`)
 - `/export [days]` - Export meal and water logs as CSV files (default: 30 days)
 
