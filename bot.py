@@ -117,6 +117,12 @@ GOALS = {
     "gain_muscle": "calorie surplus for muscle gain",
 }
 
+_GOAL_LABELS = {
+    "lose_weight": "\U0001f4c9 Lose Weight",
+    "maintain":    "\u2696\ufe0f Maintain",
+    "gain_muscle": "\U0001f4aa Gain Muscle",
+}
+
 MEALPLAN_PROMPT = (
     "You are a professional dietitian. Create a complete 7-day meal plan "
     "based on the user's profile, goals, and preferences below. "
@@ -1118,6 +1124,29 @@ def _html(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+def _build_water_status_text(user_id: int) -> str:
+    """Return a one-line water progress string for the current user."""
+    total = get_today_water(user_id)
+    target = get_water_target(user_id)
+    remaining = target - total
+    if remaining > 0:
+        return f"\U0001f4a7 Today: {total} / {target}ml ({remaining}ml remaining)"
+    return f"\u2705 Today: {total} / {target}ml \u2014 target reached!"
+
+
+def _water_quick_keyboard(user_id: int, chat_id: int) -> InlineKeyboardMarkup:
+    """2x2 grid of quick water-log buttons (250 / 500 / 750 / 1000 ml)."""
+    def _btn(ml: int) -> InlineKeyboardButton:
+        return InlineKeyboardButton(
+            f"\U0001f4a7 {ml}ml",
+            callback_data=f"water_quick:{ml}:{user_id}:{chat_id}",
+        )
+    return InlineKeyboardMarkup([
+        [_btn(250), _btn(500)],
+        [_btn(750), _btn(1000)],
+    ])
+
+
 def format_reply(data: dict, today: dict, targets: dict) -> tuple[str, str]:
     """Format calorie estimate with daily progress and macros.
     Returns (text, parse_mode) — parse_mode is 'HTML'."""
@@ -1525,8 +1554,14 @@ async def limit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def water_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    chat_id = update.effective_chat.id
     if not context.args:
-        await update.message.reply_text("Usage: /water <ml>\nExample: /water 500")
+        status = _build_water_status_text(user.id)
+        await update.message.reply_text(
+            f"\U0001f4a7 Quick water log\n{status}",
+            reply_markup=_water_quick_keyboard(user.id, chat_id),
+        )
         return
     try:
         amount = int(context.args[0])
@@ -1537,46 +1572,40 @@ async def water_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text("Amount must be between 1 and 5000 ml.")
         return
 
-    user = update.effective_user
-    save_water(user.id, user.username or user.first_name, update.effective_chat.id, amount)
-    total = get_today_water(user.id)
-    target_ml = get_water_target(user.id)
-    remaining = target_ml - total
-
-    if remaining > 0:
-        await update.message.reply_text(
-            f"\U0001f4a7 Logged {amount}ml.\n"
-            f"Today: {total} / {target_ml}ml ({remaining}ml remaining)"
-        )
-    else:
-        await update.message.reply_text(
-            f"\U0001f4a7 Logged {amount}ml.\n"
-            f"\u2705 Today: {total} / {target_ml}ml - target reached!"
-        )
+    save_water(user.id, user.username or user.first_name, chat_id, amount)
+    status = _build_water_status_text(user.id)
+    await update.message.reply_text(
+        f"\U0001f4a7 Logged {amount}ml.\n{status}",
+        reply_markup=_water_quick_keyboard(user.id, chat_id),
+    )
 
 
 async def watertoday_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
-    total = get_today_water(user_id)
-    target_ml = get_water_target(user_id)
-    remaining = target_ml - total
-    if remaining > 0:
-        await update.message.reply_text(
-            f"\U0001f4a7 Water today: {total} / {target_ml}ml"
-            f" ({remaining}ml remaining)"
-        )
-    else:
-        await update.message.reply_text(
-            f"\u2705 Water today: {total} / {target_ml}ml - target reached!"
-        )
+    chat_id = update.effective_chat.id
+    status = _build_water_status_text(user_id)
+    await update.message.reply_text(
+        status,
+        reply_markup=_water_quick_keyboard(user_id, chat_id),
+    )
 
 
 async def reminders_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
     if not context.args:
-        await update.message.reply_text("Usage: /reminders on  or  /reminders off")
+        is_on = chat_id in get_reminder_chats()
+        status = "ON \u2705" if is_on else "OFF"
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("Turn On",  callback_data=f"reminders_toggle:on:{chat_id}"),
+            InlineKeyboardButton("Turn Off", callback_data=f"reminders_toggle:off:{chat_id}"),
+        ]])
+        await update.message.reply_text(
+            f"\U0001f4a7 Water reminders are currently <b>{status}</b> for this chat.",
+            parse_mode="HTML",
+            reply_markup=keyboard,
+        )
         return
     action = context.args[0].lower()
-    chat_id = update.effective_chat.id
     if action == "on":
         add_reminder_chat(chat_id)
         schedule = "\n".join(
@@ -1593,17 +1622,17 @@ async def reminders_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 
 async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
     if not context.args:
-        await update.message.reply_text(
-            "Usage:\n"
-            "/reset meals - clear today's meal logs\n"
-            "/reset water - clear today's water logs\n"
-            "/reset all - delete all your data (meals, water, profile, diet, limits)"
-        )
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("\U0001f5d1 Today's Meals", callback_data=f"reset_action:meals:{user_id}")],
+            [InlineKeyboardButton("\U0001f5d1 Today's Water", callback_data=f"reset_action:water:{user_id}")],
+            [InlineKeyboardButton("\u26a0\ufe0f Everything",  callback_data=f"reset_action:all:{user_id}")],
+        ])
+        await update.message.reply_text("What would you like to reset?", reply_markup=keyboard)
         return
 
     action = context.args[0].lower()
-    user_id = update.effective_user.id
 
     if action == "meals":
         reset_today_meals(user_id)
@@ -1637,11 +1666,22 @@ async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def goal_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
     if not context.args:
-        goals_list = "\n".join(f"  {k} - {v}" for k, v in GOALS.items())
+        prefs = get_diet_prefs(user_id)
+        current_goal = prefs["goal"] if prefs else "maintain"
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton(
+                f"{'✓ ' if current_goal == k else ''}{label}",
+                callback_data=f"goal_select:{k}:{user_id}",
+            )
+            for k, label in _GOAL_LABELS.items()
+        ]])
+        goal_desc = GOALS.get(current_goal, current_goal)
         await update.message.reply_text(
-            f"Usage: /goal <goal>\n\nGoals:\n{goals_list}\n\n"
-            "Example: /goal lose_weight"
+            f"\U0001f3af Current goal: <b>{current_goal}</b> ({goal_desc})\nSelect a new goal:",
+            parse_mode="HTML",
+            reply_markup=keyboard,
         )
         return
 
@@ -1653,7 +1693,7 @@ async def goal_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
         return
 
-    update_diet_pref(update.effective_user.id, goal=goal)
+    update_diet_pref(user_id, goal=goal)
     await update.message.reply_text(
         f"\u2705 Goal set to: {goal} ({GOALS[goal]})"
     )
@@ -2041,9 +2081,22 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     else:
         date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
+    # Build prev/next navigation keyboard
+    date = datetime.strptime(date_str, "%Y-%m-%d").date()
+    today_date = datetime.now(timezone.utc).date()
+    prev_str = (date - timedelta(days=1)).strftime("%Y-%m-%d")
+    next_str = (date + timedelta(days=1)).strftime("%Y-%m-%d")
+    nav = [InlineKeyboardButton(f"\u2b05\ufe0f {prev_str}", callback_data=f"history_nav:{prev_str}:{user_id}")]
+    if date < today_date:
+        nav.append(InlineKeyboardButton(f"\u27a1\ufe0f {next_str}", callback_data=f"history_nav:{next_str}:{user_id}"))
+    keyboard = InlineKeyboardMarkup([nav])
+
     meals = get_meals_for_date(user_id, date_str)
     if not meals:
-        await update.message.reply_text(f"No meals logged for {date_str}.")
+        await update.message.reply_text(
+            f"No meals logged for {date_str}.",
+            reply_markup=keyboard,
+        )
         return
 
     targets = get_targets(user_id)
@@ -2068,7 +2121,7 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             f"\u26a0\ufe0f Over limit! {total_cal} / {targets['daily_limit']} kcal"
             f" (+{abs(remaining)} over)"
         )
-    await update.message.reply_text("\n".join(lines))
+    await update.message.reply_text("\n".join(lines), reply_markup=keyboard)
 
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2225,6 +2278,179 @@ async def reset_all_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.edit_message_text("Reset cancelled. Your data is safe.")
 
 
+async def goal_select_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle goal selection button from /goal."""
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    try:
+        _, goal, owner_str = query.data.split(":")
+        owner_id = int(owner_str)
+    except (ValueError, AttributeError):
+        await query.answer("Invalid request.", show_alert=True)
+        return
+    if owner_id != user_id:
+        await query.answer("This button isn't for you.", show_alert=True)
+        return
+    if goal not in GOALS:
+        await query.answer("Unknown goal.", show_alert=True)
+        return
+    update_diet_pref(user_id, goal=goal)
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton(
+            f"{'✓ ' if goal == k else ''}{label}",
+            callback_data=f"goal_select:{k}:{user_id}",
+        )
+        for k, label in _GOAL_LABELS.items()
+    ]])
+    goal_desc = GOALS.get(goal, goal)
+    await query.edit_message_text(
+        f"\u2705 Goal updated: <b>{goal}</b> ({goal_desc})\nSelect a new goal:",
+        parse_mode="HTML",
+        reply_markup=keyboard,
+    )
+
+
+async def reminders_toggle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle reminder toggle button from /reminders."""
+    query = update.callback_query
+    await query.answer()
+    try:
+        _, action, chat_id_str = query.data.split(":")
+        chat_id = int(chat_id_str)
+    except (ValueError, AttributeError):
+        await query.answer("Invalid request.", show_alert=True)
+        return
+    if action == "on":
+        add_reminder_chat(chat_id)
+    else:
+        remove_reminder_chat(chat_id)
+    is_on = chat_id in get_reminder_chats()
+    status = "ON \u2705" if is_on else "OFF"
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("Turn On",  callback_data=f"reminders_toggle:on:{chat_id}"),
+        InlineKeyboardButton("Turn Off", callback_data=f"reminders_toggle:off:{chat_id}"),
+    ]])
+    await query.edit_message_text(
+        f"\U0001f4a7 Water reminders are currently <b>{status}</b> for this chat.",
+        parse_mode="HTML",
+        reply_markup=keyboard,
+    )
+
+
+async def reset_action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle reset option button from /reset."""
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    try:
+        _, action, owner_str = query.data.split(":")
+        owner_id = int(owner_str)
+    except (ValueError, AttributeError):
+        await query.answer("Invalid request.", show_alert=True)
+        return
+    if owner_id != user_id:
+        await query.answer("This button isn't for you.", show_alert=True)
+        return
+    if action == "meals":
+        reset_today_meals(user_id)
+        await query.edit_message_text("\u2705 Today's meal logs cleared.")
+    elif action == "water":
+        reset_today_water(user_id)
+        await query.edit_message_text("\u2705 Today's water logs cleared.")
+    elif action == "all":
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("Yes, delete everything", callback_data=f"confirm_reset_all:{user_id}"),
+            InlineKeyboardButton("Cancel",                 callback_data=f"cancel_reset_all:{user_id}"),
+        ]])
+        await query.edit_message_text(
+            "Are you sure? This will permanently delete ALL your data:\n"
+            "meals, water, profile, diet preferences, calorie limits, and weight history.\n\n"
+            "This cannot be undone.",
+            reply_markup=keyboard,
+        )
+    else:
+        await query.answer("Unknown action.", show_alert=True)
+
+
+async def history_nav_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle prev/next day navigation from /history."""
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    try:
+        _, date_str, owner_str = query.data.split(":")
+        owner_id = int(owner_str)
+        datetime.strptime(date_str, "%Y-%m-%d")  # validate format
+    except (ValueError, AttributeError):
+        await query.answer("Invalid request.", show_alert=True)
+        return
+    if owner_id != user_id:
+        await query.answer("This button isn't for you.", show_alert=True)
+        return
+
+    date = datetime.strptime(date_str, "%Y-%m-%d").date()
+    today_date = datetime.now(timezone.utc).date()
+    prev_str = (date - timedelta(days=1)).strftime("%Y-%m-%d")
+    next_str = (date + timedelta(days=1)).strftime("%Y-%m-%d")
+    nav = [InlineKeyboardButton(f"\u2b05\ufe0f {prev_str}", callback_data=f"history_nav:{prev_str}:{user_id}")]
+    if date < today_date:
+        nav.append(InlineKeyboardButton(f"\u27a1\ufe0f {next_str}", callback_data=f"history_nav:{next_str}:{user_id}"))
+    keyboard = InlineKeyboardMarkup([nav])
+
+    meals = get_meals_for_date(user_id, date_str)
+    if not meals:
+        await query.edit_message_text(f"No meals logged for {date_str}.", reply_markup=keyboard)
+        return
+
+    targets = get_targets(user_id)
+    total_cal = sum(m["calories"] for m in meals)
+    total_p   = sum(m["protein_g"] for m in meals)
+    total_f   = sum(m["fat_g"] for m in meals)
+    total_c   = sum(m["carbs_g"] for m in meals)
+    remaining = targets["daily_limit"] - total_cal
+
+    lines = [f"\U0001f4cb Meals for {date_str}:"]
+    for m in meals:
+        t = m["created_at"][11:16]
+        lines.append(
+            f"- [#{m['id']}] [{t}] {_truncate(m['meal_text'])}: ~{m['calories']} kcal"
+            f" (P:{m['protein_g']}g F:{m['fat_g']}g C:{m['carbs_g']}g)"
+        )
+    lines.append(f"\nTotal: {total_cal} kcal | P: {total_p}g | F: {total_f}g | C: {total_c}g")
+    if remaining >= 0:
+        lines.append(f"\U0001f4ca {total_cal} / {targets['daily_limit']} kcal ({remaining} remaining)")
+    else:
+        lines.append(f"\u26a0\ufe0f Over limit! {total_cal} / {targets['daily_limit']} kcal (+{abs(remaining)} over)")
+
+    await query.edit_message_text("\n".join(lines), reply_markup=keyboard)
+
+
+async def water_quick_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle quick water-log button from /water, /watertoday, and meal replies."""
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    try:
+        _, amount_str, owner_str, chat_id_str = query.data.split(":")
+        amount   = int(amount_str)
+        owner_id = int(owner_str)
+        chat_id  = int(chat_id_str)
+    except (ValueError, AttributeError):
+        await query.answer("Invalid request.", show_alert=True)
+        return
+    if owner_id != user_id:
+        await query.answer("This button isn't for you.", show_alert=True)
+        return
+    user = update.effective_user
+    save_water(user.id, user.username or user.first_name, chat_id, amount)
+    status = _build_water_status_text(user.id)
+    await query.edit_message_text(
+        f"\u2705 Logged {amount}ml!\n{status}",
+        reply_markup=_water_quick_keyboard(user.id, chat_id),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Meal & photo message handlers
 # ---------------------------------------------------------------------------
@@ -2281,7 +2507,13 @@ async def handle_meal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         reply = "Something went wrong. Please try again in a moment."
         parse_mode = ""
 
-    await update.message.reply_text(reply, parse_mode=parse_mode or None)
+    water_kb = None
+    if parse_mode == "HTML":
+        water_kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("\U0001f4a7 250ml", callback_data=f"water_quick:250:{user.id}:{update.effective_chat.id}"),
+            InlineKeyboardButton("\U0001f4a7 500ml", callback_data=f"water_quick:500:{user.id}:{update.effective_chat.id}"),
+        ]])
+    await update.message.reply_text(reply, parse_mode=parse_mode or None, reply_markup=water_kb)
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2314,7 +2546,13 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         reply = "Something went wrong analyzing the photo. Please try again."
         parse_mode = ""
 
-    await update.message.reply_text(reply, parse_mode=parse_mode or None)
+    water_kb = None
+    if parse_mode == "HTML":
+        water_kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("\U0001f4a7 250ml", callback_data=f"water_quick:250:{user.id}:{update.effective_chat.id}"),
+            InlineKeyboardButton("\U0001f4a7 500ml", callback_data=f"water_quick:500:{user.id}:{update.effective_chat.id}"),
+        ]])
+    await update.message.reply_text(reply, parse_mode=parse_mode or None, reply_markup=water_kb)
 
 
 # ---------------------------------------------------------------------------
@@ -2402,7 +2640,12 @@ def main() -> None:
     app.add_handler(CommandHandler("reset", reset_command))
     app.add_handler(CallbackQueryHandler(reset_all_callback, pattern=r"^(confirm|cancel)_reset_all:\d+$"))
     app.add_handler(CallbackQueryHandler(delmeal_inline_callback, pattern=r"^delmeal_inline:\d+:\d+$"))
-    app.add_handler(CallbackQueryHandler(help_quickstart_callback, pattern=r"^help_quickstart$"))
+    app.add_handler(CallbackQueryHandler(help_quickstart_callback,    pattern=r"^help_quickstart$"))
+    app.add_handler(CallbackQueryHandler(reminders_toggle_callback,   pattern=r"^reminders_toggle:(on|off):-?\d+$"))
+    app.add_handler(CallbackQueryHandler(water_quick_callback,        pattern=r"^water_quick:\d+:\d+:-?\d+$"))
+    app.add_handler(CallbackQueryHandler(goal_select_callback,        pattern=r"^goal_select:[a-z_]+:\d+$"))
+    app.add_handler(CallbackQueryHandler(reset_action_callback,       pattern=r"^reset_action:(meals|water|all):\d+$"))
+    app.add_handler(CallbackQueryHandler(history_nav_callback,        pattern=r"^history_nav:\d{4}-\d{2}-\d{2}:\d+$"))
 
     # Diet planning commands
     app.add_handler(CommandHandler("goal", goal_command))
