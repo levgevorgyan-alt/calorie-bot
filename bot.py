@@ -21,6 +21,7 @@ from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     KeyboardButton,
+    LabeledPrice,
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
 )
@@ -29,6 +30,7 @@ from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
     MessageHandler,
+    PreCheckoutQueryHandler,
     ContextTypes,
     filters,
 )
@@ -47,6 +49,12 @@ PORT = int(os.environ.get("PORT", "10000"))
 DATABASE_URL = os.environ["DATABASE_URL"]
 DEFAULT_CALORIE_LIMIT = 1800
 DAILY_WATER_TARGET_ML = 2000
+
+# Premium / subscription settings
+BOT_OWNER_ID = int(os.environ.get("BOT_OWNER_ID", "0"))
+FREE_DAILY_MEAL_LIMIT = 5
+PREMIUM_STARS_PRICE = 299           # Stars per month (~$3.89)
+PREMIUM_SUBSCRIPTION_PERIOD = 2592000  # 30 days in seconds (auto-renewing)
 
 groq_client = Groq(api_key=GROQ_API_KEY)
 
@@ -270,6 +278,54 @@ TRANSLATIONS: dict = {
         "btn_invalid": "Invalid request.",
         "btn_not_yours": "This button isn't for you.",
         "reminder_msg": "\U0001f4a7 Water Reminder!\nTime to drink ~{amount}ml of water.\nUse /water {amount} to log it.",
+        # Premium / subscription
+        "free_limit_reached": (
+            "You've used all {limit} free meal logs for today. \u2b50\n\n"
+            "Upgrade to Premium for unlimited meals, photo analysis, and meal plans:\n"
+            "/upgrade"
+        ),
+        "premium_photo_gate": (
+            "\U0001f4f7 Photo meal analysis is a Premium feature. \u2b50\n\n"
+            "Premium unlocks: unlimited meals \u00b7 photo analysis \u00b7 7-day meal plans \u00b7 CSV export\n"
+            "/upgrade"
+        ),
+        "premium_mealplan_gate": (
+            "\U0001f957 Meal plan generation is a Premium feature. \u2b50\n\n"
+            "Premium unlocks: unlimited meals \u00b7 photo analysis \u00b7 7-day meal plans \u00b7 CSV export\n"
+            "/upgrade"
+        ),
+        "premium_export_gate": "\U0001f4ca CSV export is a Premium feature. \u2b50\n/upgrade",
+        "premium_active": (
+            "\u2b50 <b>Premium Active</b>\n"
+            "Expires: {date}\n\n"
+            "Enjoying: unlimited meals \u00b7 photos \u00b7 meal plans \u00b7 export"
+        ),
+        "premium_lifetime": "\U0001f451 <b>Lifetime Premium</b> \u2014 all features unlocked forever.",
+        "premium_free": (
+            "You're on the <b>Free plan</b>.\n\n"
+            "Today: {count}/{limit} meal logs used\n\n"
+            "Free includes: {limit} text meals/day \u00b7 all tracking commands\n"
+            "Premium adds: unlimited meals \u00b7 photos \u00b7 meal plans \u00b7 export\n\n"
+            "/upgrade \u2014 {price} \u2b50/month"
+        ),
+        "premium_activated": (
+            "\u2705 <b>Premium activated!</b>\n\n"
+            "You now have unlimited meal logging, photo analysis, "
+            "7-day meal plans, and CSV export.\n"
+            "Your subscription auto-renews monthly. Thank you! \u2b50"
+        ),
+        "upgrade_title": "\u2b50 Calorie Bot Premium",
+        "upgrade_description": (
+            "Unlimited meal logging \u00b7 Photo meal analysis \u00b7 "
+            "7-day AI meal plans \u00b7 CSV data export"
+        ),
+        "grant_success": "\u2705 Premium granted to user {user_id} for {days} days.",
+        "grant_lifetime": "\u2705 Lifetime premium granted to user {user_id}.",
+        "revoke_success": "\u2705 Premium revoked from user {user_id}.",
+        "owner_only": "\u26d4 This command is only available to the bot owner.",
+        "grant_usage": "Usage: /grant <user_id> [days]\nExamples:\n  /grant 123456789\n  /grant 123456789 30",
+        "revoke_usage": "Usage: /revoke <user_id>",
+        "already_premium": "\u2b50 You already have an active Premium subscription!\n\nUse /premium to check your status.",
     },
     "ru": {
         "start_msg": (
@@ -368,6 +424,51 @@ TRANSLATIONS: dict = {
         "btn_invalid": "\u041d\u0435\u0432\u0435\u0440\u043d\u044b\u0439 \u0437\u0430\u043f\u0440\u043e\u0441.",
         "btn_not_yours": "\u042d\u0442\u0430 \u043a\u043d\u043e\u043f\u043a\u0430 \u043d\u0435 \u0434\u043b\u044f \u0432\u0430\u0441.",
         "reminder_msg": "\U0001f4a7 \u041d\u0430\u043f\u043e\u043c\u0438\u043d\u0430\u043d\u0438\u0435 \u043e \u0432\u043e\u0434\u0435!\n\u041f\u043e\u0440\u0430 \u0432\u044b\u043f\u0438\u0442\u044c ~{amount}\u043c\u043b \u0432\u043e\u0434\u044b.\n/water {amount} \u2014 \u0437\u0430\u043f\u0438\u0441\u0430\u0442\u044c.",
+        # Premium / subscription
+        "free_limit_reached": (
+            "\u0412\u044b \u0438\u0441\u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u043b\u0438 \u0432\u0441\u0435 {limit} \u0431\u0435\u0441\u043f\u043b\u0430\u0442\u043d\u044b\u0445 \u0437\u0430\u043f\u0438\u0441\u0438 \u0435\u0434\u044b \u0441\u0435\u0433\u043e\u0434\u043d\u044f. \u2b50\n\n"
+            "\u041f\u0435\u0440\u0435\u0439\u0434\u0438\u0442\u0435 \u043d\u0430 Premium \u0434\u043b\u044f \u043d\u0435\u043e\u0433\u0440\u0430\u043d\u0438\u0447\u0435\u043d\u043d\u044b\u0445 \u0437\u0430\u043f\u0438\u0441\u0435\u0439:\n"
+            "/upgrade"
+        ),
+        "premium_photo_gate": (
+            "\U0001f4f7 \u0410\u043d\u0430\u043b\u0438\u0437 \u0444\u043e\u0442\u043e \u2014 \u0444\u0443\u043d\u043a\u0446\u0438\u044f Premium. \u2b50\n\n"
+            "Premium: \u0431\u0435\u0437\u043b\u0438\u043c\u0438\u0442 \u00b7 \u0444\u043e\u0442\u043e \u00b7 \u043f\u043b\u0430\u043d\u044b \u043f\u0438\u0442\u0430\u043d\u0438\u044f \u00b7 \u044d\u043a\u0441\u043f\u043e\u0440\u0442\n"
+            "/upgrade"
+        ),
+        "premium_mealplan_gate": (
+            "\U0001f957 \u0413\u0435\u043d\u0435\u0440\u0430\u0446\u0438\u044f \u043f\u043b\u0430\u043d\u0430 \u043f\u0438\u0442\u0430\u043d\u0438\u044f \u2014 \u0444\u0443\u043d\u043a\u0446\u0438\u044f Premium. \u2b50\n\n"
+            "Premium: \u0431\u0435\u0437\u043b\u0438\u043c\u0438\u0442 \u00b7 \u0444\u043e\u0442\u043e \u00b7 \u043f\u043b\u0430\u043d\u044b \u043f\u0438\u0442\u0430\u043d\u0438\u044f \u00b7 \u044d\u043a\u0441\u043f\u043e\u0440\u0442\n"
+            "/upgrade"
+        ),
+        "premium_export_gate": "\U0001f4ca \u042d\u043a\u0441\u043f\u043e\u0440\u0442 \u2014 \u0444\u0443\u043d\u043a\u0446\u0438\u044f Premium. \u2b50\n/upgrade",
+        "premium_active": (
+            "\u2b50 <b>Premium \u0430\u043a\u0442\u0438\u0432\u0435\u043d</b>\n"
+            "\u0418\u0441\u0442\u0435\u043a\u0430\u0435\u0442: {date}\n\n"
+            "\u0414\u043e\u0441\u0442\u0443\u043f\u043d\u043e: \u0431\u0435\u0437\u043b\u0438\u043c\u0438\u0442 \u00b7 \u0444\u043e\u0442\u043e \u00b7 \u043f\u043b\u0430\u043d\u044b \u00b7 \u044d\u043a\u0441\u043f\u043e\u0440\u0442"
+        ),
+        "premium_lifetime": "\U0001f451 <b>\u041f\u043e\u0436\u0438\u0437\u043d\u0435\u043d\u043d\u044b\u0439 Premium</b> \u2014 \u0432\u0441\u0435 \u0444\u0443\u043d\u043a\u0446\u0438\u0438 \u043d\u0430\u0432\u0441\u0435\u0433\u0434\u0430.",
+        "premium_free": (
+            "\u0412\u044b \u043d\u0430 <b>\u0431\u0435\u0441\u043f\u043b\u0430\u0442\u043d\u043e\u043c \u043f\u043b\u0430\u043d\u0435</b>.\n\n"
+            "\u0421\u0435\u0433\u043e\u0434\u043d\u044f: {count}/{limit} \u0437\u0430\u043f\u0438\u0441\u0435\u0439 \u0435\u0434\u044b \u0438\u0441\u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u043d\u043e\n\n"
+            "\u0411\u0435\u0441\u043f\u043b\u0430\u0442\u043d\u043e: {limit} \u0437\u0430\u043f\u0438\u0441\u0435\u0439/\u0434\u0435\u043d\u044c \u00b7 \u0432\u0441\u0435 \u043a\u043e\u043c\u0430\u043d\u0434\u044b\n"
+            "Premium: \u0431\u0435\u0437\u043b\u0438\u043c\u0438\u0442 \u00b7 \u0444\u043e\u0442\u043e \u00b7 \u043f\u043b\u0430\u043d\u044b \u00b7 \u044d\u043a\u0441\u043f\u043e\u0440\u0442\n\n"
+            "/upgrade \u2014 {price} \u2b50/\u043c\u0435\u0441\u044f\u0446"
+        ),
+        "premium_activated": (
+            "\u2705 <b>Premium \u0430\u043a\u0442\u0438\u0432\u0438\u0440\u043e\u0432\u0430\u043d!</b>\n\n"
+            "\u0422\u0435\u043f\u0435\u0440\u044c \u0443 \u0432\u0430\u0441 \u0431\u0435\u0437\u043b\u0438\u043c\u0438\u0442\u043d\u044b\u0435 \u0437\u0430\u043f\u0438\u0441\u0438, \u0430\u043d\u0430\u043b\u0438\u0437 \u0444\u043e\u0442\u043e, "
+            "7-\u0434\u043d\u0435\u0432\u043d\u044b\u0435 \u043f\u043b\u0430\u043d\u044b \u0438 \u044d\u043a\u0441\u043f\u043e\u0440\u0442 CSV.\n"
+            "\u041f\u043e\u0434\u043f\u0438\u0441\u043a\u0430 \u0430\u0432\u0442\u043e\u043c\u0430\u0442\u0438\u0447\u0435\u0441\u043a\u0438 \u043f\u0440\u043e\u0434\u043b\u0435\u0432\u0430\u0435\u0442\u0441\u044f. \u0421\u043f\u0430\u0441\u0438\u0431\u043e! \u2b50"
+        ),
+        "upgrade_title": "\u2b50 Calorie Bot Premium",
+        "upgrade_description": "\u0411\u0435\u0437\u043b\u0438\u043c\u0438\u0442 \u00b7 \u0424\u043e\u0442\u043e-\u0430\u043d\u0430\u043b\u0438\u0437 \u00b7 7-\u0434\u043d\u0435\u0432\u043d\u044b\u0435 \u043f\u043b\u0430\u043d\u044b \u00b7 \u042d\u043a\u0441\u043f\u043e\u0440\u0442 \u0434\u0430\u043d\u043d\u044b\u0445",
+        "grant_success": "\u2705 Premium \u0432\u044b\u0434\u0430\u043d \u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u0435\u043b\u044e {user_id} \u043d\u0430 {days} \u0434\u043d\u0435\u0439.",
+        "grant_lifetime": "\u2705 \u041f\u043e\u0436\u0438\u0437\u043d\u0435\u043d\u043d\u044b\u0439 Premium \u0432\u044b\u0434\u0430\u043d \u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u0435\u043b\u044e {user_id}.",
+        "revoke_success": "\u2705 Premium \u043e\u0442\u043e\u0437\u0432\u0430\u043d \u0443 \u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u0435\u043b\u044f {user_id}.",
+        "owner_only": "\u26d4 \u042d\u0442\u0430 \u043a\u043e\u043c\u0430\u043d\u0434\u0430 \u0434\u043e\u0441\u0442\u0443\u043f\u043d\u0430 \u0442\u043e\u043b\u044c\u043a\u043e \u0432\u043b\u0430\u0434\u0435\u043b\u044c\u0446\u0443 \u0431\u043e\u0442\u0430.",
+        "grant_usage": "\u0418\u0441\u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u043d\u0438\u0435: /grant <user_id> [\u0434\u043d\u0435\u0439]\n\u041f\u0440\u0438\u043c\u0435\u0440\u044b:\n  /grant 123456789\n  /grant 123456789 30",
+        "revoke_usage": "\u0418\u0441\u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u043d\u0438\u0435: /revoke <user_id>",
+        "already_premium": "\u2b50 \u0423 \u0432\u0430\u0441 \u0443\u0436\u0435 \u0435\u0441\u0442\u044c \u0430\u043a\u0442\u0438\u0432\u043d\u0430\u044f \u043f\u043e\u0434\u043f\u0438\u0441\u043a\u0430 Premium!\n\n\u0418\u0441\u043f\u043e\u043b\u044c\u0437\u0443\u0439\u0442\u0435 /premium \u0434\u043b\u044f \u043f\u0440\u043e\u0441\u043c\u043e\u0442\u0440\u0430 \u0441\u0442\u0430\u0442\u0443\u0441\u0430.",
     },
 }
 
@@ -644,6 +745,13 @@ def db_init() -> None:
         )""",
         """CREATE INDEX IF NOT EXISTS idx_weight_history_user
             ON weight_history(user_id, recorded_at DESC)""",
+        """CREATE TABLE IF NOT EXISTS subscriptions (
+            user_id BIGINT PRIMARY KEY,
+            plan TEXT NOT NULL DEFAULT 'free',
+            expires_at TEXT,
+            granted_by BIGINT,
+            stars_charge_id TEXT
+        )""",
     ]
     for sql in tables:
         cur.execute(sql)
@@ -930,6 +1038,57 @@ async def get_lang(update, context) -> str:
             save_user_language(user_id, lang)
     context.user_data["lang"] = lang
     return lang
+
+
+def is_premium(user_id: int) -> bool:
+    """Return True if the user has active premium or is the bot owner."""
+    if BOT_OWNER_ID and user_id == BOT_OWNER_ID:
+        return True
+    row = db_query(
+        "SELECT plan, expires_at FROM subscriptions WHERE user_id = %s",
+        (user_id,), fetch="one",
+    )
+    if not row:
+        return False
+    if row["plan"] in ("owner", "premium"):
+        if row["expires_at"] is None:
+            return True
+        return datetime.fromisoformat(row["expires_at"]) > datetime.now(timezone.utc)
+    return False
+
+
+def get_daily_meal_count(user_id: int) -> int:
+    """Count meals logged today by this user."""
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    row = db_query(
+        "SELECT COUNT(*) AS cnt FROM meals WHERE user_id = %s AND created_at LIKE %s",
+        (user_id, f"{today}%"), fetch="one",
+    )
+    return int(row["cnt"]) if row else 0
+
+
+def activate_premium(user_id: int, days: int | None,
+                     granted_by: int | None = None,
+                     charge_id: str | None = None) -> None:
+    """Grant premium to a user. days=None means lifetime."""
+    if days is None:
+        expires_at = None
+    else:
+        expires_at = (datetime.now(timezone.utc) + timedelta(days=days)).isoformat()
+    plan = "owner" if (granted_by is None and days is None) else "premium"
+    db_query(
+        "INSERT INTO subscriptions (user_id, plan, expires_at, granted_by, stars_charge_id)"
+        " VALUES (%s,%s,%s,%s,%s)"
+        " ON CONFLICT(user_id) DO UPDATE SET plan=EXCLUDED.plan,"
+        " expires_at=EXCLUDED.expires_at, granted_by=EXCLUDED.granted_by,"
+        " stars_charge_id=EXCLUDED.stars_charge_id",
+        (user_id, plan, expires_at, granted_by, charge_id),
+    )
+
+
+def revoke_premium(user_id: int) -> None:
+    """Remove a user's premium subscription."""
+    db_query("DELETE FROM subscriptions WHERE user_id = %s", (user_id,))
 
 
 def _format_time_in_tz(hour: int, minute: int, tz) -> str:
@@ -2258,6 +2417,10 @@ async def mealplan_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     lang = await get_lang(update, context)
     user_id = update.effective_user.id
 
+    if not is_premium(user_id):
+        await update.message.reply_text(t(lang, "premium_mealplan_gate"))
+        return
+
     # Pre-flight checklist
     profile = get_profile(user_id)
     prefs = get_diet_prefs(user_id)
@@ -2676,6 +2839,121 @@ async def reset_all_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.edit_message_text(t(lang, "reset_cancelled"))
 
 
+async def premium_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show the user's current subscription status."""
+    lang = await get_lang(update, context)
+    user_id = update.effective_user.id
+    if BOT_OWNER_ID and user_id == BOT_OWNER_ID:
+        await update.message.reply_text(t(lang, "premium_lifetime"), parse_mode="HTML")
+        return
+    row = db_query(
+        "SELECT plan, expires_at FROM subscriptions WHERE user_id = %s",
+        (user_id,), fetch="one",
+    )
+    if row and row["plan"] in ("owner", "premium"):
+        if row["expires_at"] is None:
+            await update.message.reply_text(t(lang, "premium_lifetime"), parse_mode="HTML")
+        else:
+            exp = datetime.fromisoformat(row["expires_at"])
+            if exp > datetime.now(timezone.utc):
+                await update.message.reply_text(
+                    t(lang, "premium_active", date=exp.strftime("%Y-%m-%d")),
+                    parse_mode="HTML",
+                )
+            else:
+                count = get_daily_meal_count(user_id)
+                await update.message.reply_text(
+                    t(lang, "premium_free", count=count,
+                      limit=FREE_DAILY_MEAL_LIMIT, price=PREMIUM_STARS_PRICE),
+                    parse_mode="HTML",
+                )
+    else:
+        count = get_daily_meal_count(user_id)
+        await update.message.reply_text(
+            t(lang, "premium_free", count=count,
+              limit=FREE_DAILY_MEAL_LIMIT, price=PREMIUM_STARS_PRICE),
+            parse_mode="HTML",
+        )
+
+
+async def upgrade_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Send a Telegram Stars invoice for premium subscription."""
+    lang = await get_lang(update, context)
+    user_id = update.effective_user.id
+    if is_premium(user_id):
+        await update.message.reply_text(t(lang, "already_premium"), parse_mode="HTML")
+        return
+    await context.bot.send_invoice(
+        chat_id=user_id,
+        title=t(lang, "upgrade_title"),
+        description=t(lang, "upgrade_description"),
+        payload="premium_monthly",
+        currency="XTR",
+        prices=[LabeledPrice(t(lang, "upgrade_title"), PREMIUM_STARS_PRICE)],
+        subscription_period=PREMIUM_SUBSCRIPTION_PERIOD,
+    )
+
+
+async def grant_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Owner only: grant premium to a user. /grant <user_id> [days]"""
+    lang = await get_lang(update, context)
+    if update.effective_user.id != BOT_OWNER_ID:
+        await update.message.reply_text(t(lang, "owner_only"))
+        return
+    if not context.args:
+        await update.message.reply_text(t(lang, "grant_usage"))
+        return
+    try:
+        target_id = int(context.args[0])
+        days = int(context.args[1]) if len(context.args) > 1 else None
+    except ValueError:
+        await update.message.reply_text(t(lang, "grant_usage"))
+        return
+    activate_premium(target_id, days=days, granted_by=update.effective_user.id)
+    if days is None:
+        await update.message.reply_text(
+            t(lang, "grant_lifetime", user_id=target_id), parse_mode="HTML"
+        )
+    else:
+        await update.message.reply_text(
+            t(lang, "grant_success", user_id=target_id, days=days), parse_mode="HTML"
+        )
+
+
+async def revoke_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Owner only: revoke premium from a user. /revoke <user_id>"""
+    lang = await get_lang(update, context)
+    if update.effective_user.id != BOT_OWNER_ID:
+        await update.message.reply_text(t(lang, "owner_only"))
+        return
+    if not context.args:
+        await update.message.reply_text(t(lang, "revoke_usage"))
+        return
+    try:
+        target_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text(t(lang, "revoke_usage"))
+        return
+    revoke_premium(target_id)
+    await update.message.reply_text(
+        t(lang, "revoke_success", user_id=target_id), parse_mode="HTML"
+    )
+
+
+async def pre_checkout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Auto-approve all pre-checkout queries (must respond within 10 seconds)."""
+    await update.pre_checkout_query.answer(ok=True)
+
+
+async def successful_payment_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Activate premium after successful Telegram Stars payment."""
+    lang = await get_lang(update, context)
+    user_id = update.effective_user.id
+    charge_id = update.message.successful_payment.telegram_payment_charge_id
+    activate_premium(user_id, days=30, charge_id=charge_id)
+    await update.message.reply_text(t(lang, "premium_activated"), parse_mode="HTML")
+
+
 async def language_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show language selection buttons."""
     lang = await get_lang(update, context)
@@ -2708,6 +2986,10 @@ async def lang_set_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send CSV exports of meal and water logs for the last N days."""
     user_id = update.effective_user.id
+    lang = context.user_data.get("lang", "en")
+    if not is_premium(user_id):
+        await update.message.reply_text(t(lang, "premium_export_gate"))
+        return
     days = 30
     if context.args:
         try:
@@ -3085,6 +3367,16 @@ async def handle_meal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.message.reply_text(t(lang, "not_food"))
         return
 
+    # --- Free tier gate: 5 meal logs/day ---
+    user_id = update.effective_user.id
+    if not is_premium(user_id):
+        count = get_daily_meal_count(user_id)
+        if count >= FREE_DAILY_MEAL_LIMIT:
+            await update.message.reply_text(
+                t(lang, "free_limit_reached", limit=FREE_DAILY_MEAL_LIMIT)
+            )
+            return
+
     # --- Clarification flow ---
     if "pending_meal" in context.user_data:
         # User answered our clarification question — combine and process
@@ -3133,10 +3425,14 @@ async def handle_meal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle a photo message as a meal photo."""
     lang = await get_lang(update, context)
+    user = update.effective_user
+
+    if not is_premium(user.id):
+        await update.message.reply_text(t(lang, "premium_photo_gate"))
+        return
+
     photo = update.message.photo[-1]
     caption = update.message.caption or ""
-
-    user = update.effective_user
     try:
         file = await photo.get_file()
         image_bytes = await file.download_as_bytearray()
@@ -3231,7 +3527,9 @@ def main() -> None:
             BotCommand("weight", "Log weight or view history"),
             BotCommand("export", "Export meals and water as CSV files"),
             BotCommand("timezone", "Set your timezone for local time display"),
-            BotCommand("language", "Change language / \u042f\u0437\u044b\u043a / \u053c\u0587\u0566\u0578\u0582"),
+            BotCommand("language", "Change language / \u042f\u0437\u044b\u043a"),
+            BotCommand("premium", "View your subscription status \u2b50"),
+            BotCommand("upgrade", "Upgrade to Premium \u2b50"),
         ]
         await application.bot.set_my_commands(commands, scope=BotCommandScopeDefault())
         await application.bot.set_my_commands(commands, scope=BotCommandScopeAllGroupChats())
@@ -3283,6 +3581,12 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(lang_set_callback, pattern=r"^lang_set:[a-z]+:\d+$"))
     app.add_handler(CommandHandler("export", export_command))
     app.add_handler(CommandHandler("timezone", timezone_command))
+    app.add_handler(CommandHandler("premium", premium_command))
+    app.add_handler(CommandHandler("upgrade", upgrade_command))
+    app.add_handler(CommandHandler("grant", grant_command))
+    app.add_handler(CommandHandler("revoke", revoke_command))
+    app.add_handler(PreCheckoutQueryHandler(pre_checkout_callback))
+    app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_handler))
 
     # Location handler MUST come before TEXT catch-all
     app.add_handler(MessageHandler(filters.LOCATION, handle_location))
