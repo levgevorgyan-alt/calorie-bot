@@ -102,6 +102,20 @@ All timestamps are ISO 8601 UTC. Day boundaries are midnight UTC.
   `callback_data` encodes the owner's `user_id` to prevent cross-user abuse in groups.
 - `DIET_PREF_COLUMNS` frozenset allowlists column names in `update_diet_pref()` to
   prevent SQL injection from crafted kwargs.
+- Non-food text is filtered by `_looks_like_food()` before calling Groq. Short food
+  descriptions (1–3 words, no quantity/cooking method) trigger `_needs_clarification()`,
+  which sends a specific question and stores the original text in `context.user_data["pending_meal"]`.
+  The next message combines both and calls the AI.
+- `_truncate(text, limit=40)` appends `…` when meal text is cut in `/today`, `/history`, `/delmeal`.
+- `/today` uses inline keyboard buttons (one per meal) for one-tap deletion via
+  `delmeal_inline_callback`. Callback pattern: `delmeal_inline:<meal_id>:<user_id>`.
+- `/mealplan` uses a pre-flight checklist (✅/❌ per requirement) before generating,
+  and sends output as 3 messages (Mon-Wed, Thu-Sun, Shopping list) via `_format_day_block()`.
+- `/diet` shows action hints for missing fields (e.g., "not set → /schedule ...").
+- `/help` sends a compact quick-start (`_HELP_QUICK_START` constant) by default;
+  `/help full` sends the full reference as a second message.
+- `/start` shows numbered onboarding steps with a "Quick Start Guide" inline button
+  handled by `help_quickstart_callback()`.
 - Meal estimation responses use Telegram HTML parse mode (`parse_mode="HTML"`). All
   user-supplied text in replies is escaped via `_html()`. `format_reply()` returns
   `(text, parse_mode)` tuple. Progress bars rendered via `_progress_bar()`.
