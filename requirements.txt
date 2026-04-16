@@ -2,3 +2,5 @@ python-telegram-bot[webhooks,job-queue]>=20.0
 groq>=0.4
 psycopg2-binary>=2.9
 Pillow>=10.0
+timezonefinder>=6.0
+tzdata>=2024.1

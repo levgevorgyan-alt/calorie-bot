@@ -15,6 +15,8 @@ descriptions and meal photos.
 - **AI — meal plan days:** Groq `meta-llama/llama-4-maverick-17b-128e-instruct` (temp 0.5)
 - **AI — shopping list:** Groq `llama-3.1-8b-instant` (temp 0.3, simpler task)
 - **TDEE/BMR:** Pure Python — Mifflin-St Jeor + Harris-Benedict (revised) + optional Katch-McArdle (no API call)
+- **Timezone:** `timezonefinder` (offline lat/lon → IANA name) + `zoneinfo` stdlib (UTC offset display)
+- **Parallelism:** `asyncio.gather` + `asyncio.to_thread` for concurrent meal plan day generation
 - **Database:** PostgreSQL via Supabase (free hosted, persistent)
 - **Hosting:** Render (web service, webhook-based)
 - **Image processing:** Pillow (resize photos >800 KB before Groq upload)
@@ -128,6 +130,24 @@ All timestamps are ISO 8601 UTC. Day boundaries are midnight UTC.
   `goal_select_callback` updates and edits the message.
 - `/reset` (no arg) shows 3 buttons (Meals / Water / Everything); Everything
   leads to the existing confirm/cancel dialog via `reset_action_callback`.
+- `generate_meal_plan` is `async def`; 3 day-group Groq calls run concurrently via
+  `asyncio.gather(asyncio.to_thread(...) × 3)`; shopping list call remains sequential.
+  `mealplan_command` uses `await generate_meal_plan(...)`. Cuts ~30s → ~10s.
+- `_groq_with_retry(func, **kwargs)` wraps all 4 Groq call sites; catches
+  `GroqRateLimitError`, sleeps 2s (`_stdlib_time.sleep`), retries once, re-raises on second failure.
+- `_MEAL_CACHE` dict (max 200 entries, FIFO eviction) caches `estimate_calories` results
+  by normalized meal text. Photos and mealplan calls are not cached.
+- `/export [days]` sends two CSV files (meals + water) via `reply_document`. Uses
+  stdlib `csv` + `io.StringIO`/`io.BytesIO`. Default 30 days, max 365.
+- `/timezone` command: no-arg shows `ReplyKeyboardMarkup` with location share button;
+  arg can be IANA name (`Europe/Berlin`) or UTC offset (`UTC+3`). Saves to
+  `profiles.user_timezone` (TEXT column, added via `ALTER TABLE IF NOT EXISTS`).
+- `handle_location` uses `_tf.timezone_at(lat, lng)` (`TimezoneFinder` singleton)
+  → IANA name → `save_user_timezone()`. Sends `ReplyKeyboardRemove()` on all paths.
+- `get_user_timezone(user_id)` returns `ZoneInfo` or `timezone.utc` (fallback).
+- `_format_time_in_tz(hour, minute, tz)` converts UTC schedule times to local display.
+- `/reminders` (all paths) now shows schedule in local time via `_format_time_in_tz`.
+- `handle_location` registered **before** TEXT catch-all in `main()`.
 - `/history` now includes ⬅️/➡️ day navigation buttons; `history_nav_callback`
   fetches the new day's meals and edits the message in-place.
 - Callback data patterns: all embed user_id for ownership checks; chat_id uses
