@@ -1,17 +1,29 @@
+import asyncio
+import csv
 import io
 import json
 import logging
 import os
 import re
 import sys
+import time as _stdlib_time
 import base64
 from datetime import datetime, timedelta, time, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from groq import Groq
+from groq import Groq, RateLimitError as GroqRateLimitError
 import psycopg2
 import psycopg2.extras
 from PIL import Image
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from timezonefinder import TimezoneFinder
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
+)
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -37,6 +49,19 @@ DEFAULT_CALORIE_LIMIT = 1800
 DAILY_WATER_TARGET_ML = 2000
 
 groq_client = Groq(api_key=GROQ_API_KEY)
+
+_tf = TimezoneFinder()  # load timezone data once at startup (~50ms)
+
+
+def _groq_with_retry(func, **kwargs):
+    """Call func(**kwargs). On GroqRateLimitError (429), wait 2s and retry once."""
+    try:
+        return func(**kwargs)
+    except GroqRateLimitError:
+        logger.warning("Groq rate limit hit \u2014 retrying in 2s")
+        _stdlib_time.sleep(2)
+        return func(**kwargs)  # re-raises on second failure
+
 
 SYSTEM_PROMPT = (
     "You are a precision nutrition assistant. Estimate calories and macronutrients "
@@ -173,7 +198,7 @@ _NON_FOOD_PHRASES = frozenset({
     "yes", "no", "nope", "yep", "yeah", "nah",
     "good", "great", "nice", "awesome", "perfect",
     "what", "who", "where", "when", "why", "how",
-    "hmm", "hm", "ugh", "oh", "ah", "aha", "test", "testing",
+    "hmm", "hm", "ugh", "oh", "ah", "aha", "test", "testing", "cancel",
 })
 
 _FOOD_SIGNAL_WORDS = frozenset({
@@ -391,6 +416,9 @@ def db_init() -> None:
     cur.execute(
         "ALTER TABLE profiles ADD COLUMN IF NOT EXISTS body_fat_pct REAL"
     )
+    cur.execute(
+        "ALTER TABLE profiles ADD COLUMN IF NOT EXISTS user_timezone TEXT"
+    )
     conn.commit()
     cur.close()
     conn.close()
@@ -476,6 +504,28 @@ def get_week_summary(user_id: int) -> list[dict]:
         " SUM(carbs_g) AS carbs_g"
         " FROM meals WHERE user_id = %s AND created_at >= %s"
         " GROUP BY day ORDER BY day",
+        (user_id, since), fetch="all",
+    )
+    return [dict(r) for r in rows]
+
+
+def get_meals_for_export(user_id: int, days: int = 30) -> list[dict]:
+    """Return all meal rows for the last N days, ordered by created_at."""
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
+    rows = db_query(
+        "SELECT meal_text, calories, protein_g, fat_g, carbs_g, created_at"
+        " FROM meals WHERE user_id = %s AND created_at >= %s ORDER BY created_at",
+        (user_id, since), fetch="all",
+    )
+    return [dict(r) for r in rows]
+
+
+def get_water_for_export(user_id: int, days: int = 30) -> list[dict]:
+    """Return all water rows for the last N days, ordered by created_at."""
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
+    rows = db_query(
+        "SELECT amount_ml, created_at FROM water"
+        " WHERE user_id = %s AND created_at >= %s ORDER BY created_at",
         (user_id, since), fetch="all",
     )
     return [dict(r) for r in rows]
@@ -568,6 +618,53 @@ def get_profile(user_id: int) -> dict | None:
         "SELECT * FROM profiles WHERE user_id = %s", (user_id,), fetch="one",
     )
     return dict(row) if row else None
+
+
+def save_user_timezone(user_id: int, tz_name: str) -> bool:
+    """Store IANA timezone for user. Returns False if no profile row exists."""
+    conn = db_connect()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "UPDATE profiles SET user_timezone = %s WHERE user_id = %s",
+            (tz_name, user_id),
+        )
+        updated = cur.rowcount > 0
+        conn.commit()
+        return updated
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cur.close()
+        conn.close()
+
+
+def get_user_timezone(user_id: int):
+    """Return ZoneInfo for the user's stored timezone, or timezone.utc if unset/invalid."""
+    profile = get_profile(user_id)
+    if not profile:
+        return timezone.utc
+    tz_name = profile.get("user_timezone")
+    if not tz_name:
+        return timezone.utc
+    try:
+        return ZoneInfo(tz_name)
+    except (ZoneInfoNotFoundError, KeyError):
+        return timezone.utc
+
+
+def _format_time_in_tz(hour: int, minute: int, tz) -> str:
+    """Convert a UTC (hour, minute) to a display string in the user's timezone.
+    Example: '16:30 your time (14:30 UTC)'  or  '14:30 UTC' when tz is UTC.
+    """
+    if tz is timezone.utc or tz == timezone.utc:
+        return f"{hour:02d}:{minute:02d} UTC"
+    now_utc = datetime.now(timezone.utc).replace(
+        hour=hour, minute=minute, second=0, microsecond=0
+    )
+    local_dt = now_utc.astimezone(tz)
+    return f"{local_dt.strftime('%H:%M')} your time ({hour:02d}:{minute:02d} UTC)"
 
 
 def get_water_target(user_id: int) -> int:
@@ -851,9 +948,21 @@ def _get_clarification_question(text: str) -> str:
     )
 
 
+_MEAL_CACHE: dict[str, dict] = {}
+_MEAL_CACHE_MAX = 200
+
+
 def estimate_calories(meal_text: str) -> dict:
-    """Send meal description to Groq and return parsed JSON."""
-    response = groq_client.chat.completions.create(
+    """Send meal description to Groq and return parsed JSON.
+    Results are cached by normalized text (strip + lowercase) up to 200 entries.
+    """
+    cache_key = meal_text.strip().lower()
+    if cache_key in _MEAL_CACHE:
+        logger.debug("Meal cache hit: %r", cache_key[:50])
+        return _MEAL_CACHE[cache_key]
+
+    response = _groq_with_retry(
+        groq_client.chat.completions.create,
         model="llama-3.3-70b-versatile",
         temperature=0.3,
         messages=[
@@ -861,7 +970,12 @@ def estimate_calories(meal_text: str) -> dict:
             {"role": "user", "content": meal_text},
         ],
     )
-    return _parse_ai_json(response.choices[0].message.content)
+    result = _parse_ai_json(response.choices[0].message.content)
+
+    if len(_MEAL_CACHE) >= _MEAL_CACHE_MAX:
+        _MEAL_CACHE.pop(next(iter(_MEAL_CACHE)))  # evict oldest (FIFO)
+    _MEAL_CACHE[cache_key] = result
+    return result
 
 
 MAX_IMAGE_BYTES = 800_000   # 800 KB — safe margin under Groq token limits
@@ -898,7 +1012,8 @@ def estimate_calories_from_photo(image_bytes: bytes, caption: str = "") -> dict:
             "text": caption if caption else "What food is in this photo? Estimate calories and macros.",
         },
     ]
-    response = groq_client.chat.completions.create(
+    response = _groq_with_retry(
+        groq_client.chat.completions.create,
         model="meta-llama/llama-4-scout-17b-16e-instruct",
         temperature=0.3,
         messages=[
@@ -1013,8 +1128,8 @@ def compute_streak(logged_dates: list[str]) -> tuple[int, int]:
     return current, longest
 
 
-def generate_meal_plan(targets: dict, profile: dict, prefs: dict) -> dict:
-    """Generate a 7-day meal plan via AI in 3 parts to stay within token limits."""
+async def generate_meal_plan(targets: dict, profile: dict, prefs: dict) -> dict:
+    """Generate a 7-day meal plan via AI. The 3 day-group calls run concurrently."""
     schedule_str = ", ".join(
         f"{s['meal']} at {s['time']}" for s in prefs["schedule"]
     )
@@ -1063,10 +1178,12 @@ def generate_meal_plan(targets: dict, profile: dict, prefs: dict) -> dict:
     all_days = []
     all_ingredients = []
 
-    for group in day_groups:
+    def _call_group_sync(group: list[str]) -> dict:
+        """Blocking Groq call for one day group — run in a thread."""
         day_names = ", ".join(group)
         user_msg = f"{base_context}\n\nGenerate meals for: {day_names}"
-        response = groq_client.chat.completions.create(
+        response = _groq_with_retry(
+            groq_client.chat.completions.create,
             model="meta-llama/llama-4-maverick-17b-128e-instruct",
             temperature=0.5,
             max_tokens=8000,
@@ -1075,7 +1192,16 @@ def generate_meal_plan(targets: dict, profile: dict, prefs: dict) -> dict:
                 {"role": "user", "content": user_msg},
             ],
         )
-        part = _parse_ai_json(response.choices[0].message.content)
+        return _parse_ai_json(response.choices[0].message.content)
+
+    # Run all 3 day-group calls concurrently in thread pool (preserves order)
+    parts = await asyncio.gather(
+        asyncio.to_thread(_call_group_sync, day_groups[0]),
+        asyncio.to_thread(_call_group_sync, day_groups[1]),
+        asyncio.to_thread(_call_group_sync, day_groups[2]),
+    )
+
+    for part in parts:
         for day in part.get("days", []):
             all_days.append(day)
             for meal in day.get("meals", []):
@@ -1100,7 +1226,8 @@ def generate_meal_plan(targets: dict, profile: dict, prefs: dict) -> dict:
     )
 
     ingredients_str = "\n".join(f"- {ing}" for ing in all_ingredients)
-    response = groq_client.chat.completions.create(
+    response = _groq_with_retry(
+        groq_client.chat.completions.create,
         model="llama-3.1-8b-instant",
         temperature=0.3,
         max_tokens=4000,
@@ -1595,12 +1722,17 @@ async def reminders_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if not context.args:
         is_on = chat_id in get_reminder_chats()
         status = "ON \u2705" if is_on else "OFF"
+        tz = get_user_timezone(update.effective_user.id)
+        schedule = "\n".join(
+            f"  {_format_time_in_tz(h, m, tz)} \u2014 {a}ml" for h, m, a in WATER_SCHEDULE
+        )
         keyboard = InlineKeyboardMarkup([[
             InlineKeyboardButton("Turn On",  callback_data=f"reminders_toggle:on:{chat_id}"),
             InlineKeyboardButton("Turn Off", callback_data=f"reminders_toggle:off:{chat_id}"),
         ]])
         await update.message.reply_text(
-            f"\U0001f4a7 Water reminders are currently <b>{status}</b> for this chat.",
+            f"\U0001f4a7 Water reminders are currently <b>{status}</b> for this chat.\n\n"
+            f"Schedule:\n{schedule}",
             parse_mode="HTML",
             reply_markup=keyboard,
         )
@@ -1608,8 +1740,9 @@ async def reminders_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     action = context.args[0].lower()
     if action == "on":
         add_reminder_chat(chat_id)
+        tz = get_user_timezone(update.effective_user.id)
         schedule = "\n".join(
-            f"  {h:02d}:{m:02d} UTC - {a}ml" for h, m, a in WATER_SCHEDULE
+            f"  {_format_time_in_tz(h, m, tz)} \u2014 {a}ml" for h, m, a in WATER_SCHEDULE
         )
         await update.message.reply_text(
             f"\U0001f4a7 Water reminders enabled for this chat!\n\nSchedule:\n{schedule}"
@@ -1910,11 +2043,11 @@ async def mealplan_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     await update.message.reply_text(
         "\u2699\ufe0f Generating your 7-day meal plan...\n"
-        "This takes ~30 seconds (4 AI calls). Please wait."
+        "This takes ~10 seconds (3 parallel AI calls + shopping list). Please wait."
     )
 
     try:
-        plan = generate_meal_plan(targets, profile, prefs)
+        plan = await generate_meal_plan(targets, profile, prefs)
 
         # Save the plan
         today = datetime.now(timezone.utc)
@@ -2278,6 +2411,190 @@ async def reset_all_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.edit_message_text("Reset cancelled. Your data is safe.")
 
 
+async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Send CSV exports of meal and water logs for the last N days."""
+    user_id = update.effective_user.id
+    days = 30
+    if context.args:
+        try:
+            days = int(context.args[0])
+            if not (1 <= days <= 365):
+                await update.message.reply_text("Days must be between 1 and 365.\nExample: /export 30")
+                return
+        except ValueError:
+            await update.message.reply_text("Usage: /export [days]\nExample: /export 30")
+            return
+
+    meals = get_meals_for_export(user_id, days)
+    waters = get_water_for_export(user_id, days)
+
+    if not meals and not waters:
+        await update.message.reply_text(
+            f"No data found for the last {days} days. Start logging meals and water!"
+        )
+        return
+
+    await update.message.reply_text(f"\u23f3 Preparing your export for the last {days} days...")
+
+    if meals:
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(["date", "time_utc", "meal_description", "calories",
+                         "protein_g", "fat_g", "carbs_g"])
+        for row in meals:
+            ts = row["created_at"]
+            writer.writerow([ts[:10], ts[11:16], row["meal_text"],
+                             row["calories"], row["protein_g"], row["fat_g"], row["carbs_g"]])
+        csv_bytes = buf.getvalue().encode("utf-8")
+        await update.message.reply_document(
+            document=io.BytesIO(csv_bytes),
+            filename=f"meals_{days}d.csv",
+            caption=f"Meals log \u2014 last {days} days ({len(meals)} entries)",
+        )
+
+    if waters:
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(["date", "time_utc", "amount_ml"])
+        for row in waters:
+            ts = row["created_at"]
+            writer.writerow([ts[:10], ts[11:16], row["amount_ml"]])
+        csv_bytes = buf.getvalue().encode("utf-8")
+        await update.message.reply_document(
+            document=io.BytesIO(csv_bytes),
+            filename=f"water_{days}d.csv",
+            caption=f"Water log \u2014 last {days} days ({len(waters)} entries)",
+        )
+
+
+async def timezone_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Set or display the user's timezone."""
+    user_id = update.effective_user.id
+
+    if not context.args:
+        tz = get_user_timezone(user_id)
+        if tz is timezone.utc or tz == timezone.utc:
+            current_str = "not set (using UTC)"
+        else:
+            current_str = getattr(tz, "key", str(tz))
+        keyboard = ReplyKeyboardMarkup(
+            [[KeyboardButton("\U0001f4cd Share my location", request_location=True)],
+             [KeyboardButton("Cancel")]],
+            resize_keyboard=True,
+            one_time_keyboard=True,
+        )
+        await update.message.reply_text(
+            f"\U0001f5fa Your timezone: <b>{current_str}</b>\n\n"
+            "Tap <b>Share my location</b> to auto-detect, or set manually:\n"
+            "/timezone Europe/Berlin\n"
+            "/timezone UTC+3  (whole hours only; use IANA name for +5:30 etc.)",
+            parse_mode="HTML",
+            reply_markup=keyboard,
+        )
+        return
+
+    tz_arg = context.args[0].strip()
+    tz_name = None
+
+    # Try as IANA name first
+    try:
+        ZoneInfo(tz_arg)
+        tz_name = tz_arg
+    except (ZoneInfoNotFoundError, KeyError):
+        pass
+
+    # Try UTC+N / UTC-N offset (whole hours only)
+    if tz_name is None:
+        m = re.match(r'^UTC([+-])(\d{1,2})$', tz_arg, re.IGNORECASE)
+        if m:
+            sign, hours = m.group(1), int(m.group(2))
+            # POSIX Etc/GMT sign is inverted: UTC+5 → Etc/GMT-5
+            posix_offset = -hours if sign == "+" else hours
+            candidate = f"Etc/GMT{posix_offset:+d}" if posix_offset != 0 else "Etc/GMT"
+            try:
+                ZoneInfo(candidate)
+                tz_name = candidate
+            except (ZoneInfoNotFoundError, KeyError):
+                pass
+        elif re.match(r'^UTC[+-]\d+:\d+', tz_arg, re.IGNORECASE):
+            await update.message.reply_text(
+                "Half-hour offsets require an IANA timezone name.\n"
+                "Examples: /timezone Asia/Kolkata  or  /timezone Australia/Adelaide"
+            )
+            return
+
+    if tz_name is None:
+        await update.message.reply_text(
+            f"Unknown timezone: {tz_arg}\n\n"
+            "Use an IANA name: /timezone Europe/Berlin\n"
+            "Or a UTC offset (whole hours): /timezone UTC+3"
+        )
+        return
+
+    saved = save_user_timezone(user_id, tz_name)
+    if not saved:
+        await update.message.reply_text(
+            "Please set your profile first with /profile before setting your timezone."
+        )
+        return
+
+    tz = ZoneInfo(tz_name)
+    local_now = datetime.now(timezone.utc).astimezone(tz)
+    offset_str = local_now.strftime("%z")
+    offset_display = f"UTC{offset_str[:3]}:{offset_str[3:]}" if len(offset_str) == 5 else offset_str
+    await update.message.reply_text(
+        f"\u2705 Timezone set to <b>{tz_name}</b> ({offset_display}).\n"
+        "Reminder times will now display in your local time.",
+        parse_mode="HTML",
+    )
+
+
+async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle a shared location message: auto-detect and store timezone."""
+    user_id = update.effective_user.id
+    loc = update.message.location
+    if not loc:
+        return
+
+    tz_name = _tf.timezone_at(lat=loc.latitude, lng=loc.longitude)
+    if not tz_name:
+        await update.message.reply_text(
+            "Could not detect timezone from this location.\n"
+            "Set manually: /timezone Europe/Berlin",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return
+
+    try:
+        tz = ZoneInfo(tz_name)
+    except (ZoneInfoNotFoundError, KeyError):
+        await update.message.reply_text(
+            f"Detected timezone '{tz_name}' is not recognized. "
+            "Set manually: /timezone Europe/Berlin",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return
+
+    saved = save_user_timezone(user_id, tz_name)
+    if not saved:
+        await update.message.reply_text(
+            "Please set your profile first with /profile, then share your location.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return
+
+    local_now = datetime.now(timezone.utc).astimezone(tz)
+    offset_str = local_now.strftime("%z")
+    offset_display = f"UTC{offset_str[:3]}:{offset_str[3:]}" if len(offset_str) == 5 else offset_str
+    await update.message.reply_text(
+        f"\u2705 Timezone detected: <b>{tz_name}</b> ({offset_display}).\n"
+        "Reminder times will now display in your local time.\n"
+        "Use /reminders to see the updated schedule.",
+        parse_mode="HTML",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+
+
 async def goal_select_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle goal selection button from /goal."""
     query = update.callback_query
@@ -2327,12 +2644,17 @@ async def reminders_toggle_callback(update: Update, context: ContextTypes.DEFAUL
         remove_reminder_chat(chat_id)
     is_on = chat_id in get_reminder_chats()
     status = "ON \u2705" if is_on else "OFF"
+    tz = get_user_timezone(update.effective_user.id)
+    schedule = "\n".join(
+        f"  {_format_time_in_tz(h, m, tz)} \u2014 {a}ml" for h, m, a in WATER_SCHEDULE
+    )
     keyboard = InlineKeyboardMarkup([[
         InlineKeyboardButton("Turn On",  callback_data=f"reminders_toggle:on:{chat_id}"),
         InlineKeyboardButton("Turn Off", callback_data=f"reminders_toggle:off:{chat_id}"),
     ]])
     await query.edit_message_text(
-        f"\U0001f4a7 Water reminders are currently <b>{status}</b> for this chat.",
+        f"\U0001f4a7 Water reminders are currently <b>{status}</b> for this chat.\n\n"
+        f"Schedule:\n{schedule}",
         parse_mode="HTML",
         reply_markup=keyboard,
     )
@@ -2614,6 +2936,8 @@ def main() -> None:
             BotCommand("history", "View meals for a past date"),
             BotCommand("stats", "Streaks and 30-day statistics"),
             BotCommand("weight", "Log weight or view history"),
+            BotCommand("export", "Export meals and water as CSV files"),
+            BotCommand("timezone", "Set your timezone for local time display"),
         ]
         await application.bot.set_my_commands(commands, scope=BotCommandScopeDefault())
         await application.bot.set_my_commands(commands, scope=BotCommandScopeAllGroupChats())
@@ -2661,6 +2985,11 @@ def main() -> None:
     app.add_handler(CommandHandler("history", history_command))
     app.add_handler(CommandHandler("stats", stats_command))
     app.add_handler(CommandHandler("weight", weight_command))
+    app.add_handler(CommandHandler("export", export_command))
+    app.add_handler(CommandHandler("timezone", timezone_command))
+
+    # Location handler MUST come before TEXT catch-all
+    app.add_handler(MessageHandler(filters.LOCATION, handle_location))
 
     # Meal & photo handlers (must be last)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_meal))
