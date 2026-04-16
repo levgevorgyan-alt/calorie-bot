@@ -116,6 +116,13 @@ All timestamps are ISO 8601 UTC. Day boundaries are midnight UTC.
 - `/diet` shows action hints for missing fields (e.g., "not set → /schedule ...").
 - `/help` sends a compact quick-start (`_HELP_QUICK_START` constant) by default;
   `/help full` sends the full reference as a second message.
+- **Multi-language support (EN/RU):** `TRANSLATIONS` dict + `t(lang, key, **kwargs)` helper. Armenian (hy) support removed pending proper translation.
+  `get_lang(update, context)` resolves language: session cache (`context.user_data["lang"]`) →
+  DB (`profiles.language`) → Telegram `language_code` auto-detection → default "en".
+  `/language` command shows 3 flag buttons; `lang_set_callback` saves to DB + session cache.
+  `profiles.language TEXT DEFAULT 'en'` added via `ALTER TABLE IF NOT EXISTS`.
+  Non-English users skip English food-intent guard and clarification flow (Groq handles multilingual input).
+  `format_reply`, `_build_water_status_text`, `_water_quick_keyboard` all accept `lang` parameter.
 - `/start` shows numbered onboarding steps with a "Quick Start Guide" inline button
   handled by `help_quickstart_callback()`.
 - `/reminders` (no arg) shows current ON/OFF status + Turn On/Turn Off buttons;
