@@ -13,3 +13,5 @@ services:
         sync: false
       - key: WEBHOOK_URL
         sync: false
+      - key: BOT_OWNER_ID
+        sync: false
