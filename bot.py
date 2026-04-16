@@ -1,3 +1,4 @@
+import io
 import json
 import logging
 import os
@@ -8,9 +9,11 @@ from datetime import datetime, timedelta, time, timezone
 from groq import Groq
 import psycopg2
 import psycopg2.extras
-from telegram import Update
+from PIL import Image
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     MessageHandler,
     ContextTypes,
@@ -142,6 +145,9 @@ WATER_SCHEDULE = [
     (20, 0, 250),
 ]
 
+# Allowlist for diet_prefs columns (prevents SQL injection in update_diet_pref)
+DIET_PREF_COLUMNS = frozenset({"goal", "schedule", "excludes", "budget_amount", "budget_currency"})
+
 
 # ---------------------------------------------------------------------------
 # Database helpers
@@ -166,6 +172,9 @@ def db_query(sql, params=(), fetch=None):
             result = None
         conn.commit()
         return result
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         cur.close()
         conn.close()
@@ -232,6 +241,14 @@ def db_init() -> None:
             shoplist_json TEXT NOT NULL,
             created_at TEXT NOT NULL
         )""",
+        """CREATE TABLE IF NOT EXISTS weight_history (
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT NOT NULL,
+            weight_kg REAL NOT NULL,
+            recorded_at TEXT NOT NULL
+        )""",
+        """CREATE INDEX IF NOT EXISTS idx_weight_history_user
+            ON weight_history(user_id, recorded_at DESC)""",
     ]
     for sql in tables:
         cur.execute(sql)
@@ -254,9 +271,47 @@ def save_meal(user_id: int, username: str, chat_id: int,
 def get_today_meals(user_id: int) -> list[dict]:
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     rows = db_query(
-        "SELECT meal_text, calories, protein_g, fat_g, carbs_g, created_at"
-        " FROM meals WHERE user_id = %s AND created_at LIKE %s",
+        "SELECT id, meal_text, calories, protein_g, fat_g, carbs_g, created_at"
+        " FROM meals WHERE user_id = %s AND created_at LIKE %s ORDER BY created_at",
         (user_id, f"{today}%"), fetch="all",
+    )
+    return [dict(r) for r in rows]
+
+
+def get_meal_by_id(meal_id: int, user_id: int) -> dict | None:
+    row = db_query(
+        "SELECT id, meal_text, calories, protein_g, fat_g, carbs_g, created_at"
+        " FROM meals WHERE id = %s AND user_id = %s",
+        (meal_id, user_id), fetch="one",
+    )
+    return dict(row) if row else None
+
+
+def delete_meal_by_id(meal_id: int, user_id: int) -> bool:
+    """Delete a specific meal. Returns True if a row was deleted."""
+    conn = db_connect()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "DELETE FROM meals WHERE id = %s AND user_id = %s",
+            (meal_id, user_id),
+        )
+        deleted = cur.rowcount > 0
+        conn.commit()
+        return deleted
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cur.close()
+        conn.close()
+
+
+def get_meals_for_date(user_id: int, date_str: str) -> list[dict]:
+    rows = db_query(
+        "SELECT id, meal_text, calories, protein_g, fat_g, carbs_g, created_at"
+        " FROM meals WHERE user_id = %s AND created_at LIKE %s ORDER BY created_at",
+        (user_id, f"{date_str}%"), fetch="all",
     )
     return [dict(r) for r in rows]
 
@@ -285,6 +340,42 @@ def get_week_summary(user_id: int) -> list[dict]:
         (user_id, since), fetch="all",
     )
     return [dict(r) for r in rows]
+
+
+def get_logged_dates(user_id: int, days: int = 30) -> list[str]:
+    """Return distinct dates (YYYY-MM-DD) where meals were logged, last N days."""
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
+    rows = db_query(
+        "SELECT DISTINCT SUBSTRING(created_at, 1, 10) AS day"
+        " FROM meals WHERE user_id = %s AND created_at >= %s ORDER BY day DESC",
+        (user_id, since), fetch="all",
+    )
+    return [r["day"] for r in rows]
+
+
+def get_daily_calorie_avg(user_id: int, days: int = 30) -> float:
+    """Return average daily calories over the last N days (only days with logs)."""
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
+    row = db_query(
+        "SELECT AVG(day_total) AS avg_cal FROM ("
+        "  SELECT SUM(calories) AS day_total"
+        "  FROM meals WHERE user_id = %s AND created_at >= %s"
+        "  GROUP BY SUBSTRING(created_at, 1, 10)"
+        ") sub",
+        (user_id, since), fetch="one",
+    )
+    return float(row["avg_cal"] or 0)
+
+
+def get_water_logged_dates(user_id: int, days: int = 30) -> list[str]:
+    """Return distinct dates where any water was logged, last N days."""
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
+    rows = db_query(
+        "SELECT DISTINCT SUBSTRING(created_at, 1, 10) AS day"
+        " FROM water WHERE user_id = %s AND created_at >= %s ORDER BY day DESC",
+        (user_id, since), fetch="all",
+    )
+    return [r["day"] for r in rows]
 
 
 def get_targets(user_id: int) -> dict:
@@ -336,6 +427,51 @@ def get_profile(user_id: int) -> dict | None:
         "SELECT * FROM profiles WHERE user_id = %s", (user_id,), fetch="one",
     )
     return dict(row) if row else None
+
+
+def get_water_target(user_id: int) -> int:
+    """Return daily water target in ml. Weight-based if profile available (~35ml/kg)."""
+    profile = get_profile(user_id)
+    if profile and profile.get("weight_kg"):
+        return min(int(profile["weight_kg"] * 35), 3500)
+    return DAILY_WATER_TARGET_ML
+
+
+def update_profile_weight(user_id: int, weight_kg: float) -> bool:
+    """Update weight in profiles table. Returns False if no profile exists."""
+    conn = db_connect()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "UPDATE profiles SET weight_kg = %s WHERE user_id = %s",
+            (weight_kg, user_id),
+        )
+        updated = cur.rowcount > 0
+        conn.commit()
+        return updated
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cur.close()
+        conn.close()
+
+
+def save_weight_history(user_id: int, weight_kg: float) -> None:
+    db_query(
+        "INSERT INTO weight_history (user_id, weight_kg, recorded_at)"
+        " VALUES (%s, %s, %s)",
+        (user_id, weight_kg, datetime.now(timezone.utc).isoformat()),
+    )
+
+
+def get_weight_history(user_id: int, limit: int = 10) -> list[dict]:
+    rows = db_query(
+        "SELECT weight_kg, recorded_at FROM weight_history"
+        " WHERE user_id = %s ORDER BY recorded_at DESC LIMIT %s",
+        (user_id, limit), fetch="all",
+    )
+    return [dict(r) for r in rows]
 
 
 def save_water(user_id: int, username: str, chat_id: int, amount_ml: int) -> None:
@@ -392,7 +528,7 @@ def reset_today_water(user_id: int) -> None:
 def reset_all_data(user_id: int) -> None:
     conn = db_connect()
     cur = conn.cursor()
-    for table in ("meals", "water", "limits", "profiles", "diet_prefs", "meal_plans"):
+    for table in ("meals", "water", "limits", "profiles", "diet_prefs", "meal_plans", "weight_history"):
         cur.execute(f"DELETE FROM {table} WHERE user_id = %s", (user_id,))
     conn.commit()
     cur.close()
@@ -415,23 +551,31 @@ def save_diet_prefs(user_id: int, goal: str, schedule: list,
 
 
 def update_diet_pref(user_id: int, **kwargs) -> None:
+    for key in kwargs:
+        if key not in DIET_PREF_COLUMNS:
+            raise ValueError(f"Invalid diet_pref column: {key!r}")
     conn = db_connect()
     cur = conn.cursor()
-    # Ensure row exists
-    cur.execute(
-        "INSERT INTO diet_prefs (user_id, goal, schedule, excludes,"
-        " budget_amount, budget_currency) VALUES (%s, 'maintain', '[]', '[]', 0, 'EUR')"
-        " ON CONFLICT DO NOTHING",
-        (user_id,),
-    )
-    for key, value in kwargs.items():
-        if key in ("schedule", "excludes"):
-            value = json.dumps(value)
-        cur.execute(f"UPDATE diet_prefs SET {key} = %s WHERE user_id = %s",
-                    (value, user_id))
-    conn.commit()
-    cur.close()
-    conn.close()
+    try:
+        # Ensure row exists
+        cur.execute(
+            "INSERT INTO diet_prefs (user_id, goal, schedule, excludes,"
+            " budget_amount, budget_currency) VALUES (%s, 'maintain', '[]', '[]', 0, 'EUR')"
+            " ON CONFLICT DO NOTHING",
+            (user_id,),
+        )
+        for key, value in kwargs.items():
+            if key in ("schedule", "excludes"):
+                value = json.dumps(value)
+            cur.execute(f"UPDATE diet_prefs SET {key} = %s WHERE user_id = %s",
+                        (value, user_id))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cur.close()
+        conn.close()
 
 
 def get_diet_prefs(user_id: int) -> dict | None:
@@ -491,8 +635,29 @@ def estimate_calories(meal_text: str) -> dict:
     return _parse_ai_json(response.choices[0].message.content)
 
 
+MAX_IMAGE_BYTES = 800_000   # 800 KB — safe margin under Groq token limits
+MAX_IMAGE_DIM = 1024        # max pixels on longest side
+
+
+def resize_image_if_needed(image_bytes: bytes) -> bytes:
+    """Resize image to stay within Groq's token limits before base64 encoding."""
+    if len(image_bytes) <= MAX_IMAGE_BYTES:
+        return image_bytes
+    img = Image.open(io.BytesIO(image_bytes))
+    if img.mode in ("RGBA", "P"):
+        img = img.convert("RGB")
+    img.thumbnail((MAX_IMAGE_DIM, MAX_IMAGE_DIM), Image.LANCZOS)
+    for quality in (85, 70, 55, 40):
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=quality, optimize=True)
+        if buf.tell() <= MAX_IMAGE_BYTES:
+            return buf.getvalue()
+    return buf.getvalue()
+
+
 def estimate_calories_from_photo(image_bytes: bytes, caption: str = "") -> dict:
     """Send a meal photo to Groq vision model and return parsed JSON."""
+    image_bytes = resize_image_if_needed(image_bytes)
     b64_image = base64.b64encode(image_bytes).decode("utf-8")
     user_content = [
         {
@@ -540,6 +705,37 @@ def scale_macros(base_calories: int, new_calories: int,
         return (protein_g, fat_g, carbs_g)
     ratio = new_calories / base_calories
     return (round(protein_g * ratio), round(fat_g * ratio), round(carbs_g * ratio))
+
+
+def compute_streak(logged_dates: list[str]) -> tuple[int, int]:
+    """Given date strings (DESC order), return (current_streak, longest_streak)."""
+    if not logged_dates:
+        return 0, 0
+    today = datetime.now(timezone.utc).date()
+    dates = sorted(
+        {datetime.strptime(d, "%Y-%m-%d").date() for d in logged_dates},
+        reverse=True,
+    )
+    # Current streak: consecutive days ending at today or yesterday
+    current = 0
+    if dates[0] >= today - timedelta(days=1):
+        check = dates[0]
+        for d in dates:
+            if d == check:
+                current += 1
+                check = check - timedelta(days=1)
+            else:
+                break
+    # Longest streak over all dates
+    longest = 1
+    run = 1
+    for i in range(1, len(dates)):
+        if (dates[i - 1] - dates[i]).days == 1:
+            run += 1
+            longest = max(longest, run)
+        else:
+            run = 1
+    return current, longest
 
 
 def generate_meal_plan(targets: dict, profile: dict, prefs: dict) -> dict:
@@ -723,7 +919,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "Add a caption for better accuracy (e.g. 'about 200g of pasta').\n\n"
         "\U0001f464 PROFILE & TARGETS\n\n"
         "/profile <height_cm> <weight_kg> <age> <gender> <activity>\n"
-        "  Set your measurements for personalized recommendations\n"
+        "  Set your measurements – AI recommends and auto-applies calorie & macro targets\n"
         "  example: /profile 180 75 28 male moderate\n"
         "  example: /profile 165 60 25 female light\n"
         "  Activity: sedentary, light, moderate, active, very_active\n\n"
@@ -732,6 +928,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "\U0001f4ca CALORIE TRACKING\n\n"
         "/today - show all meals logged today with totals\n"
         "/week - 7-day calorie and macro summary\n"
+        "/history [YYYY-MM-DD] - view meals for a past date (default: yesterday)\n"
+        "/delmeal <id> - delete a specific logged meal by ID\n"
+        "/stats - logging streaks and 30-day statistics\n"
         "/setlimit <kcal> - override daily calorie limit\n"
         "  (macros scale proportionally)\n"
         "  example: /setlimit 2200\n"
@@ -739,8 +938,11 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "\U0001f4a7 WATER TRACKING\n\n"
         "/water <ml> - log water (e.g. /water 500)\n"
         "/watertoday - show today's water intake\n"
+        "  Target is weight-based (~35ml/kg) if profile is set\n"
         "/reminders on|off - toggle water reminders\n"
-        "  Schedule: 11:00, 14:00, 16:00, 18:00, 20:00 UTC\n\n"
+        "  Schedule: 11:00, 14:00, 16:00, 18:00, 20:00 UTC\n"
+        "/weight <kg> - update your weight (e.g. /weight 74.5)\n"
+        "/weight - show weight history\n\n"
         "\U0001f957 DIET PLANNING\n\n"
         "/goal <lose_weight|maintain|gain_muscle>\n"
         "  example: /goal lose_weight\n\n"
@@ -917,7 +1119,7 @@ async def today_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     for m in meals:
         t = m["created_at"][11:16]
         lines.append(
-            f"- [{t}] {m['meal_text'][:40]}: ~{m['calories']} kcal"
+            f"- [#{m['id']}] [{t}] {m['meal_text'][:40]}: ~{m['calories']} kcal"
             f" (P:{m['protein_g']}g F:{m['fat_g']}g C:{m['carbs_g']}g)"
         )
 
@@ -936,6 +1138,7 @@ async def today_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             f" | F: {total_f}/{targets['daily_fat_g']}g"
             f" | C: {total_c}/{targets['daily_carbs_g']}g"
         )
+    lines.append("\nUse /delmeal <id> to remove a specific entry.")
     await update.message.reply_text("\n".join(lines))
 
 
@@ -1024,31 +1227,34 @@ async def water_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     user = update.effective_user
     save_water(user.id, user.username or user.first_name, update.effective_chat.id, amount)
     total = get_today_water(user.id)
-    remaining = DAILY_WATER_TARGET_ML - total
+    target_ml = get_water_target(user.id)
+    remaining = target_ml - total
 
     if remaining > 0:
         await update.message.reply_text(
             f"\U0001f4a7 Logged {amount}ml.\n"
-            f"Today: {total} / {DAILY_WATER_TARGET_ML}ml ({remaining}ml remaining)"
+            f"Today: {total} / {target_ml}ml ({remaining}ml remaining)"
         )
     else:
         await update.message.reply_text(
             f"\U0001f4a7 Logged {amount}ml.\n"
-            f"\u2705 Today: {total} / {DAILY_WATER_TARGET_ML}ml - target reached!"
+            f"\u2705 Today: {total} / {target_ml}ml - target reached!"
         )
 
 
 async def watertoday_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    total = get_today_water(update.effective_user.id)
-    remaining = DAILY_WATER_TARGET_ML - total
+    user_id = update.effective_user.id
+    total = get_today_water(user_id)
+    target_ml = get_water_target(user_id)
+    remaining = target_ml - total
     if remaining > 0:
         await update.message.reply_text(
-            f"\U0001f4a7 Water today: {total} / {DAILY_WATER_TARGET_ML}ml"
+            f"\U0001f4a7 Water today: {total} / {target_ml}ml"
             f" ({remaining}ml remaining)"
         )
     else:
         await update.message.reply_text(
-            f"\u2705 Water today: {total} / {DAILY_WATER_TARGET_ML}ml - target reached!"
+            f"\u2705 Water today: {total} / {target_ml}ml - target reached!"
         )
 
 
@@ -1093,9 +1299,23 @@ async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         reset_today_water(user_id)
         await update.message.reply_text("\u2705 Today's water logs cleared.")
     elif action == "all":
-        reset_all_data(user_id)
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    "Yes, delete everything",
+                    callback_data=f"confirm_reset_all:{user_id}",
+                ),
+                InlineKeyboardButton(
+                    "Cancel",
+                    callback_data=f"cancel_reset_all:{user_id}",
+                ),
+            ]
+        ])
         await update.message.reply_text(
-            "\u2705 All your data has been deleted (meals, water, profile, diet, limits)."
+            "Are you sure? This will permanently delete ALL your data:\n"
+            "meals, water, profile, diet preferences, calorie limits, and weight history.\n\n"
+            "This cannot be undone.",
+            reply_markup=keyboard,
         )
     else:
         await update.message.reply_text(
@@ -1402,6 +1622,200 @@ async def shoplist_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 
 # ---------------------------------------------------------------------------
+# New command handlers
+# ---------------------------------------------------------------------------
+
+async def delmeal_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not context.args:
+        await update.message.reply_text(
+            "Usage: /delmeal <id>\n"
+            "Find meal IDs in your /today list.\n"
+            "Example: /delmeal 42"
+        )
+        return
+    try:
+        meal_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text(
+            "Please provide a numeric meal ID. Example: /delmeal 42"
+        )
+        return
+
+    user_id = update.effective_user.id
+    meal = get_meal_by_id(meal_id, user_id)
+    if not meal:
+        await update.message.reply_text(
+            f"Meal #{meal_id} not found (or it doesn't belong to you)."
+        )
+        return
+
+    deleted = delete_meal_by_id(meal_id, user_id)
+    if deleted:
+        await update.message.reply_text(
+            f"\u2705 Deleted meal #{meal_id}: {meal['meal_text'][:50]} (~{meal['calories']} kcal)"
+        )
+    else:
+        await update.message.reply_text(f"Could not delete meal #{meal_id}. Please try again.")
+
+
+async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+
+    if context.args:
+        date_str = context.args[0]
+        try:
+            datetime.strptime(date_str, "%Y-%m-%d")
+        except ValueError:
+            await update.message.reply_text(
+                "Invalid date format. Use YYYY-MM-DD.\nExample: /history 2025-04-10"
+            )
+            return
+    else:
+        date_str = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    meals = get_meals_for_date(user_id, date_str)
+    if not meals:
+        await update.message.reply_text(f"No meals logged for {date_str}.")
+        return
+
+    targets = get_targets(user_id)
+    total_cal = sum(m["calories"] for m in meals)
+    total_p = sum(m["protein_g"] for m in meals)
+    total_f = sum(m["fat_g"] for m in meals)
+    total_c = sum(m["carbs_g"] for m in meals)
+    remaining = targets["daily_limit"] - total_cal
+
+    lines = [f"\U0001f4cb Meals for {date_str}:"]
+    for m in meals:
+        t = m["created_at"][11:16]
+        lines.append(
+            f"- [#{m['id']}] [{t}] {m['meal_text'][:40]}: ~{m['calories']} kcal"
+            f" (P:{m['protein_g']}g F:{m['fat_g']}g C:{m['carbs_g']}g)"
+        )
+    lines.append(f"\nTotal: {total_cal} kcal | P: {total_p}g | F: {total_f}g | C: {total_c}g")
+    if remaining >= 0:
+        lines.append(f"\U0001f4ca {total_cal} / {targets['daily_limit']} kcal ({remaining} remaining)")
+    else:
+        lines.append(
+            f"\u26a0\ufe0f Over limit! {total_cal} / {targets['daily_limit']} kcal"
+            f" (+{abs(remaining)} over)"
+        )
+    await update.message.reply_text("\n".join(lines))
+
+
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    targets = get_targets(user_id)
+
+    logged_dates = get_logged_dates(user_id, days=30)
+    if not logged_dates:
+        await update.message.reply_text(
+            "No meal data yet. Start logging meals to see your stats!"
+        )
+        return
+
+    current_streak, longest_streak = compute_streak(logged_dates)
+    avg_cal = get_daily_calorie_avg(user_id, days=30)
+
+    water_dates = set(get_water_logged_dates(user_id, days=30))
+    water_adherence = round(len(water_dates) / 30 * 100)
+
+    goal_limit = targets["daily_limit"]
+    low = goal_limit * 0.9
+    high = goal_limit * 1.1
+    since = (datetime.now(timezone.utc) - timedelta(days=30)).strftime("%Y-%m-%d")
+    day_rows = db_query(
+        "SELECT SUM(calories) AS total"
+        " FROM meals WHERE user_id = %s AND created_at >= %s"
+        " GROUP BY SUBSTRING(created_at, 1, 10)",
+        (user_id, since), fetch="all",
+    )
+    on_goal_days = sum(1 for r in day_rows if low <= r["total"] <= high)
+    goal_adherence = round(on_goal_days / len(day_rows) * 100) if day_rows else 0
+
+    s = lambda n: "s" if n != 1 else ""
+    lines = [
+        "\U0001f4ca Your Stats (last 30 days):\n",
+        f"Logging streak:  {current_streak} day{s(current_streak)}",
+        f"Longest streak:  {longest_streak} day{s(longest_streak)}",
+        f"Days logged:     {len(logged_dates)} / 30\n",
+        f"Avg daily kcal:  {avg_cal:.0f} kcal  (target: {goal_limit})",
+        f"Calorie goal:    {goal_adherence}% of logged days within \u00b110%",
+        f"Water logging:   {water_adherence}% of days",
+    ]
+    await update.message.reply_text("\n".join(lines))
+
+
+async def weight_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+
+    if not context.args:
+        history = get_weight_history(user_id, limit=10)
+        if not history:
+            await update.message.reply_text(
+                "No weight history yet.\n"
+                "Usage: /weight <kg>  (e.g. /weight 74.5)"
+            )
+            return
+        lines = ["Weight history (most recent first):"]
+        for entry in history:
+            date_str = entry["recorded_at"][:10]
+            lines.append(f"- {date_str}: {entry['weight_kg']} kg")
+        await update.message.reply_text("\n".join(lines))
+        return
+
+    try:
+        weight_kg = float(context.args[0].replace(",", "."))
+    except ValueError:
+        await update.message.reply_text(
+            "Please provide a number. Example: /weight 74.5"
+        )
+        return
+
+    if not (30 <= weight_kg <= 300):
+        await update.message.reply_text("Weight must be between 30 and 300 kg.")
+        return
+
+    profile = get_profile(user_id)
+    if not profile:
+        await update.message.reply_text(
+            "No profile found. Please set your full profile first:\n"
+            "/profile <height_cm> <weight_kg> <age> <gender> <activity>"
+        )
+        return
+
+    update_profile_weight(user_id, weight_kg)
+    save_weight_history(user_id, weight_kg)
+    new_water_target = min(int(weight_kg * 35), 3500)
+
+    await update.message.reply_text(
+        f"\u2705 Weight updated to {weight_kg} kg.\n\n"
+        f"New water target: {new_water_target} ml/day\n"
+        f"Run /profile to recalculate calorie & macro recommendations."
+    )
+
+
+async def reset_all_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+
+    user_id = update.effective_user.id
+    parts = query.data.split(":")
+    action_part = parts[0]
+    owner_id = int(parts[1])
+
+    if owner_id != user_id:
+        await query.answer("This button isn't for you.", show_alert=True)
+        return
+
+    if action_part == "confirm_reset_all":
+        reset_all_data(user_id)
+        await query.edit_message_text("\u2705 All your data has been permanently deleted.")
+    else:
+        await query.edit_message_text("Reset cancelled. Your data is safe.")
+
+
+# ---------------------------------------------------------------------------
 # Meal & photo message handlers
 # ---------------------------------------------------------------------------
 
@@ -1520,6 +1934,10 @@ def main() -> None:
             BotCommand("shoplist", "Show last shopping list"),
             BotCommand("diet", "Show diet preferences"),
             BotCommand("reset", "Reset your data"),
+            BotCommand("delmeal", "Delete a logged meal by ID"),
+            BotCommand("history", "View meals for a past date"),
+            BotCommand("stats", "Streaks and 30-day statistics"),
+            BotCommand("weight", "Log weight or view history"),
         ]
         await application.bot.set_my_commands(commands, scope=BotCommandScopeDefault())
         await application.bot.set_my_commands(commands, scope=BotCommandScopeAllGroupChats())
@@ -1542,8 +1960,9 @@ def main() -> None:
     app.add_handler(CommandHandler("watertoday", watertoday_command))
     app.add_handler(CommandHandler("reminders", reminders_command))
 
-    # Reset command
+    # Reset command + inline keyboard callback
     app.add_handler(CommandHandler("reset", reset_command))
+    app.add_handler(CallbackQueryHandler(reset_all_callback, pattern=r"^(confirm|cancel)_reset_all:\d+$"))
 
     # Diet planning commands
     app.add_handler(CommandHandler("goal", goal_command))
@@ -1553,6 +1972,12 @@ def main() -> None:
     app.add_handler(CommandHandler("mealplan", mealplan_command))
     app.add_handler(CommandHandler("shoplist", shoplist_command))
     app.add_handler(CommandHandler("diet", diet_command))
+
+    # New commands
+    app.add_handler(CommandHandler("delmeal", delmeal_command))
+    app.add_handler(CommandHandler("history", history_command))
+    app.add_handler(CommandHandler("stats", stats_command))
+    app.add_handler(CommandHandler("weight", weight_command))
 
     # Meal & photo handlers (must be last)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_meal))
