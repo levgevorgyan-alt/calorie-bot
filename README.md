@@ -82,17 +82,18 @@ Total: ~360 kcal | P: 16g | F: 23g | C: 23g
 ### Calories
 - `/today` - Show today's meals with inline delete buttons (tap to remove a meal)
 - `/week` - 7-day calorie summary
-- `/history [YYYY-MM-DD]` - View meals for a date (defaults to today)
+- `/history [YYYY-MM-DD]` - View meals for a date (defaults to today); includes ⬅️/➡️ day navigation buttons
 - `/delmeal <id>` - Delete a specific logged meal by ID
 - `/stats` - Logging streaks and 30-day statistics
 - `/setlimit <kcal>` - Override daily calorie limit (macros scale proportionally)
 - `/limit` - Show your current limit
 
 ### Water
-- `/water <ml>` - Log water intake (e.g. `/water 500`)
-- `/watertoday` - Show today's water intake vs your personal target
-- `/reminders on` - Enable water reminders in this chat
-- `/reminders off` - Disable water reminders
+- `/water <ml>` - Log water intake (e.g. `/water 500`); reply includes quick-add buttons
+- `/water` - No arg: shows today's progress + 250/500/750/1000ml tap-to-log buttons
+- `/watertoday` - Today's water intake with quick-add buttons
+- `/reminders` - No arg: shows current ON/OFF status with toggle buttons
+- `/reminders on` / `/reminders off` - Enable or disable water reminders via text command
 
 ### Water Reminder Schedule (UTC)
 | Time  | Amount |
@@ -111,7 +112,8 @@ Daily target: weight-based (~35 ml/kg, capped at 3500 ml) when profile is set, o
 - `/reset all` - Delete all your data (asks for confirmation via inline button)
 
 ### Diet Planning
-- `/goal <lose_weight|maintain|gain_muscle>` - Set your fitness goal
+- `/goal` - No arg: shows current goal with 3 tap-to-select buttons (Lose Weight / Maintain / Gain Muscle)
+- `/goal <lose_weight|maintain|gain_muscle>` - Set goal via text command
 - `/schedule <meal time>, ...` - Set eating schedule (e.g. `/schedule breakfast 8:00, lunch 13:00, dinner 19:00`)
 - `/exclude <foods>` - Set foods to avoid (e.g. `/exclude pork, shellfish`). Use `/exclude clear` to reset.
 - `/budget <amount> <currency>` - Set weekly food budget (e.g. `/budget 80 EUR`)
