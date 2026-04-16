@@ -38,61 +38,69 @@ DAILY_WATER_TARGET_ML = 2000
 groq_client = Groq(api_key=GROQ_API_KEY)
 
 SYSTEM_PROMPT = (
-    "You are a nutrition assistant. Given a meal description, estimate calories "
-    "and macronutrients for each item and provide totals. Consider the cooking "
-    "method (fried, boiled, grilled, raw) when estimating. "
-    "Return ONLY valid JSON with no extra text:\n"
+    "You are a precision nutrition assistant. Estimate calories and macronutrients "
+    "for each item in a meal description, using USDA FoodData Central values as "
+    "your primary reference for standard foods. "
+    "Return ONLY valid JSON with no extra text.\n\n"
+    "PORTION RULES:\n"
+    "- Restaurant/cafe meals: assume portions are 20-30% larger than home-cooked "
+    "(restaurants use more oil, butter, and larger serving sizes).\n"
+    "- Named fast-food/chain items (Big Mac, Chipotle burrito, etc.): use the "
+    "brand's published nutritional data (Big Mac = 550 kcal, medium fries = 320 kcal).\n"
+    "- If no weight is specified, assume a realistic portion and state it in 'portion'.\n\n"
+    "COOKING METHOD ADJUSTMENTS:\n"
+    "- Fried: add 10-20% calories vs boiled/grilled due to oil absorption.\n"
+    "- Boiled/steamed: no fat addition. Grilled: minimal fat. Raw: use raw reference.\n\n"
+    "JSON schema (return ONLY this, no markdown fences):\n"
     '{"items": [{"name": "<food>", "portion": "<weight or description>", '
     '"calories": <int>, "protein_g": <int>, "fat_g": <int>, "carbs_g": <int>, '
-    '"per_100g_raw": <int>, "per_100g_cooked": <int>}], '
+    '"fiber_g": <int>, "per_100g_raw": <int>, "per_100g_cooked": <int>, '
+    '"confidence": "<high|medium|low>", '
+    '"context_hint": "<home_cooked|restaurant|branded|unknown>"}], '
     '"total": <int>, "total_protein_g": <int>, "total_fat_g": <int>, '
-    '"total_carbs_g": <int>}\n\n'
-    "If the user does not specify a weight, assume a reasonable portion and state it "
-    "in the 'portion' field (e.g. '150g', '1 medium'). Always include per_100g_raw "
-    "and per_100g_cooked for each item. If raw and cooked values are the same "
-    "(e.g. for bread, drinks), use the same number for both. "
-    "If a description is unclear, make your best estimate and note assumptions "
-    "in a short 'note' field.\n\n"
-    "Example input: 2 scrambled eggs, 1 toast with butter\n"
-    "Example output: "
+    '"total_carbs_g": <int>, "total_fiber_g": <int>}\n\n'
+    "confidence: 'high'=standard food known weight; 'medium'=reasonable estimate; "
+    "'low'=ambiguous. Add 'note' field for unclear descriptions.\n\n"
+    "Example: 2 scrambled eggs, 1 toast with butter\n"
     '{"items": [{"name": "Scrambled eggs", "portion": "2 large (100g)", '
-    '"calories": 182, "protein_g": 12, "fat_g": 14, "carbs_g": 2, '
-    '"per_100g_raw": 143, "per_100g_cooked": 182}, '
+    '"calories": 182, "protein_g": 12, "fat_g": 14, "carbs_g": 2, "fiber_g": 0, '
+    '"per_100g_raw": 143, "per_100g_cooked": 182, '
+    '"confidence": "high", "context_hint": "home_cooked"}, '
     '{"name": "Toast with butter", "portion": "1 slice (40g bread + 10g butter)", '
-    '"calories": 178, "protein_g": 4, "fat_g": 9, "carbs_g": 21, '
-    '"per_100g_raw": 265, "per_100g_cooked": 265}], '
-    '"total": 360, "total_protein_g": 16, "total_fat_g": 23, "total_carbs_g": 23}'
+    '"calories": 178, "protein_g": 4, "fat_g": 9, "carbs_g": 21, "fiber_g": 2, '
+    '"per_100g_raw": 265, "per_100g_cooked": 265, '
+    '"confidence": "high", "context_hint": "home_cooked"}], '
+    '"total": 360, "total_protein_g": 16, "total_fat_g": 23, '
+    '"total_carbs_g": 23, "total_fiber_g": 2}'
 )
 
 VISION_PROMPT = (
-    "You are a nutrition assistant. Look at this photo of a meal and identify "
-    "each food item visible. Estimate calories and macronutrients for each item. "
-    "Consider the cooking method visible in the photo. "
-    "Return ONLY valid JSON with no extra text:\n"
-    '{"items": [{"name": "<food>", "portion": "<estimated weight or description>", '
+    "You are a precision nutrition analyst specializing in food photo analysis. "
+    "Return ONLY valid JSON with no extra text.\n\n"
+    "ANALYSIS APPROACH:\n"
+    "1. IDENTIFY every food item visible including garnishes, sauces, visible oils.\n"
+    "2. SCALE using reference objects — standard dinner plate: 26-28 cm diameter; "
+    "fork: ~19 cm; tablespoon: ~15 ml. If no reference is visible, use defaults below.\n"
+    "3. DEPTH: account for volume, not just surface. A bowl may hold 50% more than it looks.\n"
+    "4. COOKING METHOD from visual cues: oil sheen = fried; char marks = grilled; "
+    "apply appropriate calorie adjustments.\n"
+    "5. CONTEXT: home-cooked (smaller/irregular) vs restaurant (larger/garnished) vs branded.\n\n"
+    "PORTION DEFAULTS when no scale reference is visible:\n"
+    "- Full dinner plate: 400-600g total | Side plate: 150-300g | Large bowl: 300-500ml\n"
+    "- Restaurant plate: 20-30% larger than home-cooked equivalent\n\n"
+    "JSON schema (return ONLY this, no markdown fences):\n"
+    '{"items": [{"name": "<food>", "portion": "<estimated weight or volume>", '
     '"calories": <int>, "protein_g": <int>, "fat_g": <int>, "carbs_g": <int>, '
-    '"per_100g_raw": <int>, "per_100g_cooked": <int>}], '
+    '"fiber_g": <int>, "per_100g_raw": <int>, "per_100g_cooked": <int>, '
+    '"confidence": "<high|medium|low>", '
+    '"context_hint": "<home_cooked|restaurant|branded|unknown>"}], '
     '"total": <int>, "total_protein_g": <int>, "total_fat_g": <int>, '
-    '"total_carbs_g": <int>}\n\n'
-    "Estimate portion sizes from visual cues (plate size, utensils, etc). "
-    "Always include per_100g_raw and per_100g_cooked for each item. "
-    "If you cannot identify a food clearly, make your best guess and add a "
-    "'note' field explaining your assumptions."
+    '"total_carbs_g": <int>, "total_fiber_g": <int>}\n\n'
+    "confidence: 'high'=item clear and portion estimable; 'medium'=partially obscured; "
+    "'low'=unclear food or heavily mixed dish. Add 'note' for unclear items."
 )
 
-PROFILE_PROMPT = (
-    "You are a nutrition expert. Based on the following person's measurements, "
-    "recommend their optimal daily calorie intake and macronutrient targets "
-    "for maintaining a healthy weight at their specified activity level. "
-    "Return ONLY valid JSON with no extra text:\n"
-    '{"daily_calories": <int>, "daily_protein_g": <int>, '
-    '"daily_fat_g": <int>, "daily_carbs_g": <int>}\n\n'
-    "Use established nutrition science (Mifflin-St Jeor for BMR). "
-    "Activity multipliers: sedentary=1.2, light=1.375, moderate=1.55, "
-    "active=1.725, very_active=1.9. "
-    "Protein should be ~1.6-2.0g per kg bodyweight. "
-    "Fat should be ~25-30% of calories. Remaining calories from carbs."
-)
+# PROFILE_PROMPT removed — replaced by pure Python BMR calculation in calculate_recommendations()
 
 ACTIVITY_LEVELS = {
     "sedentary": "little or no exercise",
@@ -252,6 +260,10 @@ def db_init() -> None:
     ]
     for sql in tables:
         cur.execute(sql)
+    # Add body_fat_pct column if it doesn't exist yet (safe migration)
+    cur.execute(
+        "ALTER TABLE profiles ADD COLUMN IF NOT EXISTS body_fat_pct REAL"
+    )
     conn.commit()
     cur.close()
     conn.close()
@@ -406,19 +418,21 @@ def set_targets(user_id: int, calories: int,
 
 def save_profile(user_id: int, height_cm: int, weight_kg: float,
                  age: int, gender: str, activity: str, rec_calories: int,
-                 rec_protein_g: int, rec_fat_g: int, rec_carbs_g: int) -> None:
+                 rec_protein_g: int, rec_fat_g: int, rec_carbs_g: int,
+                 body_fat_pct: float | None = None) -> None:
     db_query(
         "INSERT INTO profiles (user_id, height_cm, weight_kg, age, gender, activity,"
-        " rec_calories, rec_protein_g, rec_fat_g, rec_carbs_g)"
-        " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"
+        " rec_calories, rec_protein_g, rec_fat_g, rec_carbs_g, body_fat_pct)"
+        " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"
         " ON CONFLICT(user_id) DO UPDATE SET height_cm = EXCLUDED.height_cm,"
         " weight_kg = EXCLUDED.weight_kg, age = EXCLUDED.age,"
         " gender = EXCLUDED.gender, activity = EXCLUDED.activity,"
         " rec_calories = EXCLUDED.rec_calories,"
         " rec_protein_g = EXCLUDED.rec_protein_g,"
-        " rec_fat_g = EXCLUDED.rec_fat_g, rec_carbs_g = EXCLUDED.rec_carbs_g",
+        " rec_fat_g = EXCLUDED.rec_fat_g, rec_carbs_g = EXCLUDED.rec_carbs_g,"
+        " body_fat_pct = EXCLUDED.body_fat_pct",
         (user_id, height_cm, weight_kg, age, gender, activity,
-         rec_calories, rec_protein_g, rec_fat_g, rec_carbs_g),
+         rec_calories, rec_protein_g, rec_fat_g, rec_carbs_g, body_fat_pct),
     )
 
 
@@ -622,6 +636,45 @@ def _parse_ai_json(raw: str) -> dict:
     return json.loads(raw)
 
 
+def _validate_meal_plan_macros(plan: dict, targets: dict) -> list[str]:
+    """Check each day's totals against calorie (±5%) and protein (±10%) targets.
+    Returns a list of warning strings; empty = all days pass."""
+    cal_target = targets["daily_limit"]
+    prot_target = targets["daily_protein_g"]
+    warnings = []
+    for day in plan.get("days", []):
+        day_name = day.get("day", "?")
+        dt = day.get("day_total", {})
+        cal = dt.get("calories", 0)
+        prot = dt.get("protein_g", 0)
+        if not (cal_target * 0.95 <= cal <= cal_target * 1.05):
+            pct = round((cal / cal_target - 1) * 100, 1) if cal_target else 0
+            sign = "+" if pct > 0 else ""
+            warnings.append(f"{day_name}: {cal} kcal ({sign}{pct}% vs {cal_target})")
+        if prot_target > 0 and not (prot_target * 0.90 <= prot <= prot_target * 1.10):
+            pct = round((prot / prot_target - 1) * 100, 1) if prot_target else 0
+            sign = "+" if pct > 0 else ""
+            warnings.append(f"{day_name}: {prot}g protein ({sign}{pct}% vs {prot_target}g)")
+    return warnings
+
+
+def _progress_bar(current: int, target: int, width: int = 10) -> str:
+    """ASCII progress bar. e.g. [████████░░] 80%"""
+    if target <= 0:
+        return ""
+    pct = min(current / target, 1.0)
+    filled = round(pct * width)
+    bar = "\u2588" * filled + "\u2591" * (width - filled)
+    return f"[{bar}] {round(pct * 100)}%"
+
+
+_CONFIDENCE_ICONS = {"high": "\u2705", "medium": "\U0001f7e1", "low": "\u26a0\ufe0f"}
+
+
+def _confidence_icon(confidence: str) -> str:
+    return _CONFIDENCE_ICONS.get(confidence, "")
+
+
 def estimate_calories(meal_text: str) -> dict:
     """Send meal description to Groq and return parsed JSON."""
     response = groq_client.chat.completions.create(
@@ -680,22 +733,68 @@ def estimate_calories_from_photo(image_bytes: bytes, caption: str = "") -> dict:
     return _parse_ai_json(response.choices[0].message.content)
 
 
-def calculate_recommendations(height_cm: int, weight_kg: float,
-                              age: int, gender: str, activity: str) -> dict:
-    """Ask AI to recommend daily calories and macros based on profile."""
-    user_msg = (
-        f"Height: {height_cm}cm, Weight: {weight_kg}kg, "
-        f"Age: {age}, Gender: {gender}, Activity level: {activity}"
-    )
-    response = groq_client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        temperature=0.2,
-        messages=[
-            {"role": "system", "content": PROFILE_PROMPT},
-            {"role": "user", "content": user_msg},
-        ],
-    )
-    return _parse_ai_json(response.choices[0].message.content)
+_ACTIVITY_MULTIPLIERS = {
+    "sedentary": 1.2, "light": 1.375, "moderate": 1.55,
+    "active": 1.725, "very_active": 1.9,
+}
+
+
+def calculate_recommendations(
+    height_cm: int, weight_kg: float, age: int, gender: str, activity: str,
+    body_fat_pct: float | None = None,
+) -> dict:
+    """
+    Compute TDEE using multiple BMR formulas (OmniCalculator methodology).
+    Averages all available formulas for a balanced recommendation. No API call.
+
+    Formulas:
+      - Mifflin-St Jeor (best for general population)
+      - Harris-Benedict revised (Roza & Shizgal 1984)
+      - Katch-McArdle (most accurate when body fat % is known)
+    """
+    multiplier = _ACTIVITY_MULTIPLIERS.get(activity, 1.55)
+
+    # Formula 1: Mifflin-St Jeor
+    if gender == "male":
+        bmr_mifflin = 10 * weight_kg + 6.25 * height_cm - 5 * age + 5
+    else:
+        bmr_mifflin = 10 * weight_kg + 6.25 * height_cm - 5 * age - 161
+
+    # Formula 2: Harris-Benedict revised (Roza & Shizgal, 1984)
+    if gender == "male":
+        bmr_harris = 13.397 * weight_kg + 4.799 * height_cm - 5.677 * age + 88.362
+    else:
+        bmr_harris = 9.247 * weight_kg + 3.098 * height_cm - 4.330 * age + 447.593
+
+    bmr_values = [bmr_mifflin, bmr_harris]
+
+    # Formula 3: Katch-McArdle (requires body fat %)
+    bmr_katch = None
+    if body_fat_pct is not None and 5 <= body_fat_pct <= 50:
+        lbm = weight_kg * (1 - body_fat_pct / 100)
+        bmr_katch = 370 + 21.6 * lbm
+        bmr_values.append(bmr_katch)
+
+    bmr_avg = sum(bmr_values) / len(bmr_values)
+    daily_calories = round(bmr_avg * multiplier)
+
+    # Macros: 1.8 g/kg protein, 27.5% fat, rest carbs
+    daily_protein_g = round(weight_kg * 1.8)
+    daily_fat_g = round((daily_calories * 0.275) / 9)
+    daily_carbs_g = max(0, round(
+        (daily_calories - daily_protein_g * 4 - daily_fat_g * 9) / 4
+    ))
+
+    return {
+        "daily_calories": daily_calories,
+        "daily_protein_g": daily_protein_g,
+        "daily_fat_g": daily_fat_g,
+        "daily_carbs_g": daily_carbs_g,
+        "bmr_mifflin": round(bmr_mifflin),
+        "bmr_harris": round(bmr_harris),
+        "bmr_katch": round(bmr_katch) if bmr_katch is not None else None,
+        "formulas_used": len(bmr_values),
+    }
 
 
 def scale_macros(base_calories: int, new_calories: int,
@@ -792,7 +891,7 @@ def generate_meal_plan(targets: dict, profile: dict, prefs: dict) -> dict:
         day_names = ", ".join(group)
         user_msg = f"{base_context}\n\nGenerate meals for: {day_names}"
         response = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model="meta-llama/llama-4-maverick-17b-128e-instruct",
             temperature=0.5,
             max_tokens=8000,
             messages=[
@@ -805,6 +904,11 @@ def generate_meal_plan(targets: dict, profile: dict, prefs: dict) -> dict:
             all_days.append(day)
             for meal in day.get("meals", []):
                 all_ingredients.extend(meal.get("ingredients", []))
+
+    # Validate macro targets before generating shopping list
+    macro_warnings = _validate_meal_plan_macros({"days": all_days}, targets)
+    if macro_warnings:
+        logger.warning("Meal plan macro deviations: %s", "; ".join(macro_warnings))
 
     # Generate shopping list from all ingredients
     shoplist_prompt = (
@@ -821,7 +925,7 @@ def generate_meal_plan(targets: dict, profile: dict, prefs: dict) -> dict:
 
     ingredients_str = "\n".join(f"- {ing}" for ing in all_ingredients)
     response = groq_client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model="llama-3.1-8b-instant",
         temperature=0.3,
         max_tokens=4000,
         messages=[
@@ -839,59 +943,75 @@ def generate_meal_plan(targets: dict, profile: dict, prefs: dict) -> dict:
     }
 
 
-def format_reply(data: dict, today: dict, targets: dict) -> str:
-    """Format calorie estimate with daily progress and macros."""
-    lines = ["\U0001f37d Calorie Estimate:"]
+def _html(text: str) -> str:
+    """Escape text for Telegram HTML parse mode."""
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def format_reply(data: dict, today: dict, targets: dict) -> tuple[str, str]:
+    """Format calorie estimate with daily progress and macros.
+    Returns (text, parse_mode) — parse_mode is 'HTML'."""
+    lines = ["\U0001f37d <b>Calorie Estimate</b>"]
     for item in data.get("items", []):
         portion = item.get("portion", "")
-        portion_str = f" ({portion})" if portion else ""
+        portion_str = f" ({_html(portion)})" if portion else ""
         raw = item.get("per_100g_raw", "?")
         cooked = item.get("per_100g_cooked", "?")
         p = item.get("protein_g", 0)
-        f = item.get("fat_g", 0)
+        f_val = item.get("fat_g", 0)
         c = item.get("carbs_g", 0)
+        fib = item.get("fiber_g", 0)
+        conf = _confidence_icon(item.get("confidence", ""))
+        name = _html(item.get("name", ""))
         lines.append(
-            f"- {item['name']}{portion_str}: ~{item['calories']} kcal"
-            f"\n  P: {p}g | F: {f}g | C: {c}g"
-            f"\n  per 100g: {raw} raw / {cooked} cooked"
+            f"{conf} <b>{name}</b>{portion_str}: ~{item['calories']} kcal\n"
+            f"   P: {p}g | F: {f_val}g | C: {c}g | Fiber: {fib}g\n"
+            f"   <i>per 100g: {raw} raw / {cooked} cooked</i>"
         )
 
     tp = data.get("total_protein_g", 0)
     tf = data.get("total_fat_g", 0)
     tc = data.get("total_carbs_g", 0)
-    lines.append(f"\nTotal: ~{data['total']} kcal | P: {tp}g | F: {tf}g | C: {tc}g")
+    tfib = data.get("total_fiber_g", 0)
+    lines.append(
+        f"\n<b>Meal total:</b> ~{data.get('total', 0)} kcal"
+        f" | P: {tp}g | F: {tf}g | C: {tc}g | Fiber: {tfib}g"
+    )
 
     note = data.get("note")
     if note:
-        lines.append(f"({note})")
+        lines.append(f"<i>{_html(note)}</i>")
 
     # Daily progress
     cal_limit = targets["daily_limit"]
     cal_today = today["calories"]
     remaining = cal_limit - cal_today
+    bar = _progress_bar(cal_today, cal_limit)
     if remaining >= 0:
         lines.append(
-            f"\n\U0001f4ca Today: {cal_today} / {cal_limit} kcal"
-            f" ({remaining} remaining)"
+            f"\n\U0001f4ca <b>Today:</b> {cal_today} / {cal_limit} kcal\n"
+            f"{bar} ({remaining} remaining)"
         )
     else:
         lines.append(
-            f"\n\u26a0\ufe0f Over limit! {cal_today} / {cal_limit} kcal"
-            f" (+{abs(remaining)} over)"
+            f"\n\u26a0\ufe0f <b>Over limit!</b> {cal_today} / {cal_limit} kcal\n"
+            f"{bar} (+{abs(remaining)} over)"
         )
 
-    # Macro targets (only if profile is set)
     tp_target = targets["daily_protein_g"]
     tf_target = targets["daily_fat_g"]
     tc_target = targets["daily_carbs_g"]
     if tp_target > 0:
+        p_bar = _progress_bar(today["protein_g"], tp_target)
+        f_bar = _progress_bar(today["fat_g"], tf_target)
+        c_bar = _progress_bar(today["carbs_g"], tc_target)
         lines.append(
-            f"   P: {today['protein_g']}/{tp_target}g"
-            f" | F: {today['fat_g']}/{tf_target}g"
-            f" | C: {today['carbs_g']}/{tc_target}g"
+            f"P: {today['protein_g']}/{tp_target}g {p_bar}\n"
+            f"F: {today['fat_g']}/{tf_target}g {f_bar}\n"
+            f"C: {today['carbs_g']}/{tc_target}g {c_bar}"
         )
 
-    return "\n".join(lines)
+    return "\n".join(lines), "HTML"
 
 
 # ---------------------------------------------------------------------------
@@ -918,10 +1038,11 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "\U0001f4f7 You can also send a PHOTO of your meal!\n"
         "Add a caption for better accuracy (e.g. 'about 200g of pasta').\n\n"
         "\U0001f464 PROFILE & TARGETS\n\n"
-        "/profile <height_cm> <weight_kg> <age> <gender> <activity>\n"
-        "  Set your measurements – AI recommends and auto-applies calorie & macro targets\n"
+        "/profile <height_cm> <weight_kg> <age> <gender> <activity> [body_fat%]\n"
+        "  Calculates TDEE using Mifflin-St Jeor + Harris-Benedict (averaged)\n"
+        "  Add body fat % for Katch-McArdle formula (most accurate)\n"
         "  example: /profile 180 75 28 male moderate\n"
-        "  example: /profile 165 60 25 female light\n"
+        "  example: /profile 180 75 28 male moderate 18\n"
         "  Activity: sedentary, light, moderate, active, very_active\n\n"
         "/myprofile - show your profile and daily targets\n\n"
         "/macros - show today's macro progress (P/F/C)\n\n"
@@ -970,9 +1091,10 @@ async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             f"  {k} - {v}" for k, v in ACTIVITY_LEVELS.items()
         )
         await update.message.reply_text(
-            "Usage: /profile <height_cm> <weight_kg> <age> <gender> <activity>\n\n"
+            "Usage: /profile <height_cm> <weight_kg> <age> <gender> <activity> [body_fat%]\n\n"
             f"Activity levels:\n{activity_list}\n\n"
-            "Example: /profile 180 75 28 male moderate"
+            "Example: /profile 180 75 28 male moderate\n"
+            "Example: /profile 180 75 28 male moderate 18  (with body fat % for Katch-McArdle)"
         )
         return
 
@@ -982,6 +1104,7 @@ async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         age = int(context.args[2])
         gender = context.args[3].lower()
         activity = context.args[4].lower()
+        body_fat_pct = float(context.args[5]) if len(context.args) >= 6 else None
     except (ValueError, IndexError):
         await update.message.reply_text(
             "Invalid input. Example: /profile 180 75 28 male moderate"
@@ -1008,39 +1131,47 @@ async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             f"Invalid activity level. Choose one:\n{activity_list}"
         )
         return
+    if body_fat_pct is not None and not (5 <= body_fat_pct <= 50):
+        await update.message.reply_text("Body fat % must be between 5 and 50.")
+        return
 
-    await update.message.reply_text("\u2699\ufe0f Calculating your recommendations...")
+    recs = calculate_recommendations(height_cm, weight_kg, age, gender, activity, body_fat_pct)
+    rec_cal = recs["daily_calories"]
+    rec_p = recs["daily_protein_g"]
+    rec_f = recs["daily_fat_g"]
+    rec_c = recs["daily_carbs_g"]
 
-    try:
-        recs = calculate_recommendations(height_cm, weight_kg, age, gender, activity)
-        rec_cal = recs["daily_calories"]
-        rec_p = recs["daily_protein_g"]
-        rec_f = recs["daily_fat_g"]
-        rec_c = recs["daily_carbs_g"]
+    save_profile(update.effective_user.id, height_cm, weight_kg, age, gender, activity,
+                 rec_cal, rec_p, rec_f, rec_c, body_fat_pct)
+    set_targets(update.effective_user.id, rec_cal, rec_p, rec_f, rec_c)
 
-        save_profile(update.effective_user.id, height_cm, weight_kg, age, gender, activity,
-                     rec_cal, rec_p, rec_f, rec_c)
-        # Set as active targets
-        set_targets(update.effective_user.id, rec_cal, rec_p, rec_f, rec_c)
-
-        await update.message.reply_text(
-            f"\u2705 Profile saved!\n\n"
-            f"Height: {height_cm}cm | Weight: {weight_kg}kg\n"
-            f"Age: {age} | Gender: {gender}\n"
-            f"Activity: {activity} ({ACTIVITY_LEVELS[activity]})\n\n"
-            f"\U0001f3af Daily Recommendations:\n"
-            f"Calories: {rec_cal} kcal\n"
-            f"Protein: {rec_p}g\n"
-            f"Fat: {rec_f}g\n"
-            f"Carbs: {rec_c}g\n\n"
-            f"These are now your active daily targets.\n"
-            f"Use /setlimit to adjust calories (macros will scale)."
+    # Build BMR breakdown
+    bmr_lines = [
+        f"  Mifflin-St Jeor: {recs['bmr_mifflin']} kcal/day (BMR)",
+        f"  Harris-Benedict: {recs['bmr_harris']} kcal/day (BMR)",
+    ]
+    if recs["bmr_katch"] is not None:
+        bmr_lines.append(
+            f"  Katch-McArdle:   {recs['bmr_katch']} kcal/day (BMR, body fat {body_fat_pct}%)"
         )
-    except Exception:
-        logger.exception("Error calculating profile recommendations")
-        await update.message.reply_text(
-            "Something went wrong calculating recommendations. Please try again."
-        )
+    bmr_breakdown = "\n".join(bmr_lines)
+    formula_note = (
+        f"Average of {recs['formulas_used']} formulas"
+        if recs["formulas_used"] > 1 else "Mifflin-St Jeor"
+    )
+
+    await update.message.reply_text(
+        f"\u2705 Profile saved!\n\n"
+        f"Height: {height_cm}cm | Weight: {weight_kg}kg\n"
+        f"Age: {age} | Gender: {gender}\n"
+        f"Activity: {activity} ({ACTIVITY_LEVELS[activity]})\n\n"
+        f"\U0001f4ca BMR Estimates:\n{bmr_breakdown}\n\n"
+        f"\U0001f3af Daily Targets ({formula_note}):\n"
+        f"Calories: {rec_cal} kcal/day (TDEE)\n"
+        f"Protein: {rec_p}g | Fat: {rec_f}g | Carbs: {rec_c}g\n\n"
+        f"These are now your active daily targets.\n"
+        f"Use /setlimit to adjust calories (macros will scale)."
+    )
 
 
 async def myprofile_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1060,7 +1191,7 @@ async def myprofile_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         f"Height: {profile['height_cm']}cm | Weight: {profile['weight_kg']}kg\n"
         f"Age: {profile['age']} | Gender: {profile['gender']}\n"
         f"Activity: {activity} ({activity_desc})\n\n"
-        f"\U0001f3af AI Recommendations:\n"
+        f"\U0001f3af TDEE Recommendations:\n"
         f"Calories: {profile['rec_calories']} kcal\n"
         f"P: {profile['rec_protein_g']}g | F: {profile['rec_fat_g']}g"
         f" | C: {profile['rec_carbs_g']}g\n\n"
@@ -1076,29 +1207,26 @@ async def macros_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     today = get_today_totals(user_id)
     targets = get_targets(user_id)
 
-    lines = ["\U0001f4ca Today's Macros:"]
-    lines.append(
-        f"Calories: {today['calories']} / {targets['daily_limit']} kcal"
-    )
+    cal_bar = _progress_bar(today["calories"], targets["daily_limit"])
+    lines = [
+        "\U0001f4ca <b>Today's Macros</b>",
+        f"Calories: {today['calories']} / {targets['daily_limit']} kcal {cal_bar}",
+    ]
 
     if targets["daily_protein_g"] > 0:
-        lines.append(
-            f"Protein:  {today['protein_g']} / {targets['daily_protein_g']}g"
-        )
-        lines.append(
-            f"Fat:      {today['fat_g']} / {targets['daily_fat_g']}g"
-        )
-        lines.append(
-            f"Carbs:    {today['carbs_g']} / {targets['daily_carbs_g']}g"
-        )
+        p_bar = _progress_bar(today["protein_g"], targets["daily_protein_g"])
+        f_bar = _progress_bar(today["fat_g"], targets["daily_fat_g"])
+        c_bar = _progress_bar(today["carbs_g"], targets["daily_carbs_g"])
+        lines.append(f"Protein: {today['protein_g']} / {targets['daily_protein_g']}g {p_bar}")
+        lines.append(f"Fat:     {today['fat_g']} / {targets['daily_fat_g']}g {f_bar}")
+        lines.append(f"Carbs:   {today['carbs_g']} / {targets['daily_carbs_g']}g {c_bar}")
     else:
-        lines.append(f"Protein:  {today['protein_g']}g")
-        lines.append(f"Fat:      {today['fat_g']}g")
-        lines.append(f"Carbs:    {today['carbs_g']}g")
-        lines.append("\nSet your profile for personalized targets:")
-        lines.append("/profile <height_cm> <weight_kg> <age> <gender>")
+        lines.append(f"Protein: {today['protein_g']}g")
+        lines.append(f"Fat:     {today['fat_g']}g")
+        lines.append(f"Carbs:   {today['carbs_g']}g")
+        lines.append("\n<i>Set your profile for personalized targets: /profile</i>")
 
-    await update.message.reply_text("\n".join(lines))
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
 async def today_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1526,6 +1654,19 @@ async def mealplan_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             json.dumps(plan), json.dumps(shoplist),
         )
 
+        # Warn user if any days deviate >10% from calorie target
+        cal_target = targets["daily_limit"]
+        bad_days = [
+            d.get("day", "?")
+            for d in plan.get("days", [])
+            if not (cal_target * 0.90 <= d.get("day_total", {}).get("calories", 0) <= cal_target * 1.10)
+        ]
+        if bad_days:
+            await update.message.reply_text(
+                f"Note: {', '.join(bad_days)} may not hit your calorie target precisely. "
+                "The plan is still valid — adjust portions slightly if needed."
+            )
+
         # Send day-by-day messages
         for day_data in plan.get("days", []):
             lines = [f"\U0001f4c5 {day_data['day']}"]
@@ -1837,15 +1978,17 @@ async def handle_meal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                   calories, protein, fat, carbs)
         today = get_today_totals(user.id)
         targets = get_targets(user.id)
-        reply = format_reply(data, today, targets)
+        reply, parse_mode = format_reply(data, today, targets)
     except json.JSONDecodeError:
         logger.exception("Failed to parse Groq response")
         reply = "Sorry, I couldn't parse the calorie data. Try rephrasing your meal."
+        parse_mode = ""
     except Exception:
         logger.exception("Error estimating calories")
         reply = "Something went wrong. Please try again in a moment."
+        parse_mode = ""
 
-    await update.message.reply_text(reply)
+    await update.message.reply_text(reply, parse_mode=parse_mode or None)
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1868,15 +2011,17 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                   calories, protein, fat, carbs)
         today = get_today_totals(user.id)
         targets = get_targets(user.id)
-        reply = format_reply(data, today, targets)
+        reply, parse_mode = format_reply(data, today, targets)
     except json.JSONDecodeError:
         logger.exception("Failed to parse Groq vision response")
         reply = "Sorry, I couldn't identify the food in this photo. Try adding a caption describing the meal."
+        parse_mode = ""
     except Exception:
         logger.exception("Error estimating calories from photo")
         reply = "Something went wrong analyzing the photo. Please try again."
+        parse_mode = ""
 
-    await update.message.reply_text(reply)
+    await update.message.reply_text(reply, parse_mode=parse_mode or None)
 
 
 # ---------------------------------------------------------------------------
