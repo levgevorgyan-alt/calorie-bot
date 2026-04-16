@@ -117,6 +117,7 @@ All timestamps are ISO 8601 UTC. Day boundaries are midnight UTC.
 - `/help` sends a compact quick-start (`_HELP_QUICK_START` constant) by default;
   `/help full` sends the full reference as a second message.
 - **Multi-language support (EN/RU):** `TRANSLATIONS` dict + `t(lang, key, **kwargs)` helper. Armenian (hy) support removed pending proper translation.
+- **Premium subscription (Telegram Stars):** `subscriptions` table stores plan/expires_at/granted_by. `is_premium(user_id)` checks owner (`BOT_OWNER_ID` env) and DB. `activate_premium(user_id, days, granted_by, charge_id)` and `revoke_premium(user_id)` manage subscriptions. `/upgrade` sends a 299-Star recurring invoice. Free tier: 5 text meals/day; premium unlocks unlimited logging, photo analysis, /mealplan, /export. Owner commands `/grant` and `/revoke` are hidden (not in BotCommand list). Payment flow: `PreCheckoutQueryHandler` auto-approves → `filters.SUCCESSFUL_PAYMENT` activates 30-day premium. `FREE_DAILY_MEAL_LIMIT=5`, `PREMIUM_STARS_PRICE=299`, `PREMIUM_SUBSCRIPTION_PERIOD=2592000`.
   `get_lang(update, context)` resolves language: session cache (`context.user_data["lang"]`) →
   DB (`profiles.language`) → Telegram `language_code` auto-detection → default "en".
   `/language` command shows 3 flag buttons; `lang_set_callback` saves to DB + session cache.
