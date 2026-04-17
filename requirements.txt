@@ -1,4 +1,4 @@
-python-telegram-bot[webhooks,job-queue]>=20.0
+python-telegram-bot[webhooks,job-queue]>=21.4
 groq>=0.4
 psycopg2-binary>=2.9
 Pillow>=10.0
