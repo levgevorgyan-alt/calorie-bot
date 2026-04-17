@@ -54,7 +54,7 @@ DAILY_WATER_TARGET_ML = 2000
 BOT_OWNER_ID = int(os.environ.get("BOT_OWNER_ID", "0"))
 FREE_DAILY_MEAL_LIMIT = 5
 PREMIUM_STARS_PRICE = 299           # Stars per month (~$3.89)
-PREMIUM_SUBSCRIPTION_PERIOD = 2592000  # 30 days in seconds (auto-renewing)
+PREMIUM_DAYS = 30  # days of premium per payment
 
 groq_client = Groq(api_key=GROQ_API_KEY)
 
@@ -306,13 +306,13 @@ TRANSLATIONS: dict = {
             "Today: {count}/{limit} meal logs used\n\n"
             "Free includes: {limit} text meals/day \u00b7 all tracking commands\n"
             "Premium adds: unlimited meals \u00b7 photos \u00b7 meal plans \u00b7 export\n\n"
-            "/upgrade \u2014 {price} \u2b50/month"
+            "/upgrade \u2014 {price} \u2b50 / 30 days"
         ),
         "premium_activated": (
             "\u2705 <b>Premium activated!</b>\n\n"
             "You now have unlimited meal logging, photo analysis, "
             "7-day meal plans, and CSV export.\n"
-            "Your subscription auto-renews monthly. Thank you! \u2b50"
+            "Valid for 30 days. Use /upgrade again to renew. Thank you! \u2b50"
         ),
         "upgrade_title": "\u2b50 Calorie Bot Premium",
         "upgrade_description": (
@@ -452,13 +452,13 @@ TRANSLATIONS: dict = {
             "\u0421\u0435\u0433\u043e\u0434\u043d\u044f: {count}/{limit} \u0437\u0430\u043f\u0438\u0441\u0435\u0439 \u0435\u0434\u044b \u0438\u0441\u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u043d\u043e\n\n"
             "\u0411\u0435\u0441\u043f\u043b\u0430\u0442\u043d\u043e: {limit} \u0437\u0430\u043f\u0438\u0441\u0435\u0439/\u0434\u0435\u043d\u044c \u00b7 \u0432\u0441\u0435 \u043a\u043e\u043c\u0430\u043d\u0434\u044b\n"
             "Premium: \u0431\u0435\u0437\u043b\u0438\u043c\u0438\u0442 \u00b7 \u0444\u043e\u0442\u043e \u00b7 \u043f\u043b\u0430\u043d\u044b \u00b7 \u044d\u043a\u0441\u043f\u043e\u0440\u0442\n\n"
-            "/upgrade \u2014 {price} \u2b50/\u043c\u0435\u0441\u044f\u0446"
+            "/upgrade \u2014 {price} \u2b50 / 30 \u0434\u043d\u0435\u0439"
         ),
         "premium_activated": (
             "\u2705 <b>Premium \u0430\u043a\u0442\u0438\u0432\u0438\u0440\u043e\u0432\u0430\u043d!</b>\n\n"
             "\u0422\u0435\u043f\u0435\u0440\u044c \u0443 \u0432\u0430\u0441 \u0431\u0435\u0437\u043b\u0438\u043c\u0438\u0442\u043d\u044b\u0435 \u0437\u0430\u043f\u0438\u0441\u0438, \u0430\u043d\u0430\u043b\u0438\u0437 \u0444\u043e\u0442\u043e, "
             "7-\u0434\u043d\u0435\u0432\u043d\u044b\u0435 \u043f\u043b\u0430\u043d\u044b \u0438 \u044d\u043a\u0441\u043f\u043e\u0440\u0442 CSV.\n"
-            "\u041f\u043e\u0434\u043f\u0438\u0441\u043a\u0430 \u0430\u0432\u0442\u043e\u043c\u0430\u0442\u0438\u0447\u0435\u0441\u043a\u0438 \u043f\u0440\u043e\u0434\u043b\u0435\u0432\u0430\u0435\u0442\u0441\u044f. \u0421\u043f\u0430\u0441\u0438\u0431\u043e! \u2b50"
+            "\u0414\u0435\u0439\u0441\u0442\u0432\u0443\u0435\u0442 30 \u0434\u043d\u0435\u0439. \u041f\u043e\u0432\u0442\u043e\u0440\u0438\u0442\u0435 /upgrade \u0434\u043b\u044f \u043f\u0440\u043e\u0434\u043b\u0435\u043d\u0438\u044f. \u0421\u043f\u0430\u0441\u0438\u0431\u043e! \u2b50"
         ),
         "upgrade_title": "\u2b50 Calorie Bot Premium",
         "upgrade_description": "\u0411\u0435\u0437\u043b\u0438\u043c\u0438\u0442 \u00b7 \u0424\u043e\u0442\u043e-\u0430\u043d\u0430\u043b\u0438\u0437 \u00b7 7-\u0434\u043d\u0435\u0432\u043d\u044b\u0435 \u043f\u043b\u0430\u043d\u044b \u00b7 \u042d\u043a\u0441\u043f\u043e\u0440\u0442 \u0434\u0430\u043d\u043d\u044b\u0445",
@@ -2887,10 +2887,9 @@ async def upgrade_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         chat_id=user_id,
         title=t(lang, "upgrade_title"),
         description=t(lang, "upgrade_description"),
-        payload="premium_monthly",
+        payload="premium_30d",
         currency="XTR",
         prices=[LabeledPrice(t(lang, "upgrade_title"), PREMIUM_STARS_PRICE)],
-        subscription_period=PREMIUM_SUBSCRIPTION_PERIOD,
     )
 
 
@@ -2950,7 +2949,7 @@ async def successful_payment_handler(update: Update, context: ContextTypes.DEFAU
     lang = await get_lang(update, context)
     user_id = update.effective_user.id
     charge_id = update.message.successful_payment.telegram_payment_charge_id
-    activate_premium(user_id, days=30, charge_id=charge_id)
+    activate_premium(user_id, days=PREMIUM_DAYS, charge_id=charge_id)
     await update.message.reply_text(t(lang, "premium_activated"), parse_mode="HTML")
 
 
