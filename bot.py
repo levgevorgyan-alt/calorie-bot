@@ -2839,6 +2839,91 @@ async def reset_all_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.edit_message_text(t(lang, "reset_cancelled"))
 
 
+async def try_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Estimate calories for a meal without saving it to the log."""
+    lang = await get_lang(update, context)
+
+    if not context.args:
+        usage = {
+            "en": (
+                "Usage: /try <meal description>\n"
+                "Example: /try 2 scrambled eggs with toast\n\n"
+                "Estimates calories without adding to your log."
+            ),
+            "ru": (
+                "\u0418\u0441\u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u043d\u0438\u0435: /try <\u043e\u043f\u0438\u0441\u0430\u043d\u0438\u0435 \u0435\u0434\u044b>\n"
+                "\u041f\u0440\u0438\u043c\u0435\u0440: /try 2 \u044f\u0439\u0446\u0430 \u0441 \u0442\u043e\u0441\u0442\u043e\u043c\n\n"
+                "\u041e\u0446\u0435\u043d\u0438\u0432\u0430\u0435\u0442 \u043a\u0430\u043b\u043e\u0440\u0438\u0438 \u0431\u0435\u0437 \u0441\u043e\u0445\u0440\u0430\u043d\u0435\u043d\u0438\u044f \u0432 \u0434\u043d\u0435\u0432\u043d\u0438\u043a."
+            ),
+        }
+        await update.message.reply_text(usage.get(lang, usage["en"]))
+        return
+
+    meal_text = " ".join(context.args)
+
+    try:
+        data = estimate_calories(meal_text)
+
+        header = {
+            "en": "\U0001f50d <b>Calorie Preview</b> <i>(not saved to log)</i>",
+            "ru": "\U0001f50d <b>\u041f\u0440\u0435\u0434\u0432\u0430\u0440\u0438\u0442\u0435\u043b\u044c\u043d\u044b\u0439 \u043f\u0440\u043e\u0441\u043c\u043e\u0442\u0440</b> <i>(\u043d\u0435 \u0441\u043e\u0445\u0440\u0430\u043d\u044f\u0435\u0442\u0441\u044f)</i>",
+        }
+        lines = [header.get(lang, header["en"])]
+
+        for item in data.get("items", []):
+            portion = item.get("portion", "")
+            portion_str = f" ({_html(portion)})" if portion else ""
+            raw = item.get("per_100g_raw", "?")
+            cooked = item.get("per_100g_cooked", "?")
+            p = item.get("protein_g", 0)
+            f_val = item.get("fat_g", 0)
+            c = item.get("carbs_g", 0)
+            fib = item.get("fiber_g", 0)
+            conf = _confidence_icon(item.get("confidence", ""))
+            name = _html(item.get("name", ""))
+            lines.append(
+                f"{conf} <b>{name}</b>{portion_str}: ~{item['calories']} kcal\n"
+                f"   P: {p}g | F: {f_val}g | C: {c}g | Fiber: {fib}g\n"
+                f"   <i>per 100g: {raw} raw / {cooked} cooked</i>"
+            )
+
+        tp = data.get("total_protein_g", 0)
+        tf = data.get("total_fat_g", 0)
+        tc = data.get("total_carbs_g", 0)
+        tfib = data.get("total_fiber_g", 0)
+        lines.append(
+            f"\n<b>Total:</b> ~{data.get('total', 0)} kcal"
+            f" | P: {tp}g | F: {tf}g | C: {tc}g | Fiber: {tfib}g"
+        )
+
+        note = data.get("note")
+        if note:
+            lines.append(f"<i>{_html(note)}</i>")
+
+        footer = {
+            "en": (
+                "\n<i>\u26a1 Preview only \u2014 not added to your log.\n"
+                "Send the description as a normal message to log it.</i>"
+            ),
+            "ru": (
+                "\n<i>\u26a1 \u041f\u0440\u0435\u0434\u0432\u0430\u0440\u0438\u0442\u0435\u043b\u044c\u043d\u044b\u0439 \u043f\u0440\u043e\u0441\u043c\u043e\u0442\u0440 \u2014 \u043d\u0435 \u0434\u043e\u0431\u0430\u0432\u043b\u0435\u043d\u043e \u0432 \u0434\u043d\u0435\u0432\u043d\u0438\u043a.\n"
+                "\u041e\u0442\u043f\u0440\u0430\u0432\u044c\u0442\u0435 \u043e\u043f\u0438\u0441\u0430\u043d\u0438\u0435 \u043e\u0431\u044b\u0447\u043d\u044b\u043c \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0435\u043c, \u0447\u0442\u043e\u0431\u044b \u0437\u0430\u043f\u0438\u0441\u0430\u0442\u044c.</i>"
+            ),
+        }
+        lines.append(footer.get(lang, footer["en"]))
+
+        await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+    except json.JSONDecodeError:
+        logger.exception("Failed to parse Groq response in /try")
+        await update.message.reply_text(
+            "Sorry, couldn't parse the calorie data. Try rephrasing your description."
+        )
+    except Exception:
+        logger.exception("Error in /try command")
+        await update.message.reply_text("Something went wrong. Please try again.")
+
+
 async def premium_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show the user's current subscription status."""
     lang = await get_lang(update, context)
@@ -3527,6 +3612,7 @@ def main() -> None:
             BotCommand("export", "Export meals and water as CSV files"),
             BotCommand("timezone", "Set your timezone for local time display"),
             BotCommand("language", "Change language / \u042f\u0437\u044b\u043a"),
+            BotCommand("try", "Preview calories without saving to log"),
             BotCommand("premium", "View your subscription status \u2b50"),
             BotCommand("upgrade", "Upgrade to Premium \u2b50"),
         ]
@@ -3580,6 +3666,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(lang_set_callback, pattern=r"^lang_set:[a-z]+:\d+$"))
     app.add_handler(CommandHandler("export", export_command))
     app.add_handler(CommandHandler("timezone", timezone_command))
+    app.add_handler(CommandHandler("try", try_command))
     app.add_handler(CommandHandler("premium", premium_command))
     app.add_handler(CommandHandler("upgrade", upgrade_command))
     app.add_handler(CommandHandler("grant", grant_command))
