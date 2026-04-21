@@ -5,17 +5,17 @@ A Telegram bot that estimates meal calories and macronutrients (protein, fat,
 carbs) using AI (Groq/Llama), tracks daily intake per user with personalized
 targets based on body measurements, enforces configurable calorie/macro limits,
 logs water intake, and sends scheduled water reminders. Supports both text
-descriptions and meal photos.
+descriptions and meal photos. English-only, single-tier (no premium gating).
 
 ## Tech Stack
 - **Language:** Python 3.9+
 - **Telegram SDK:** `python-telegram-bot` v20+ (async, webhook mode with job-queue)
+- **AI — input preflight:** Groq `llama-3.1-8b-instant` (temp 0.2, validates input before estimation)
 - **AI — meal text:** Groq `llama-3.3-70b-versatile` (temp 0.3)
 - **AI — meal photo:** Groq `meta-llama/llama-4-scout-17b-16e-instruct` (temp 0.3)
 - **AI — meal plan days:** Groq `meta-llama/llama-4-maverick-17b-128e-instruct` (temp 0.5)
 - **AI — shopping list:** Groq `llama-3.1-8b-instant` (temp 0.3, simpler task)
 - **TDEE/BMR:** Pure Python — Mifflin-St Jeor + Harris-Benedict (revised) + optional Katch-McArdle (no API call)
-- **Timezone:** `timezonefinder` (offline lat/lon → IANA name) + `zoneinfo` stdlib (UTC offset display)
 - **Parallelism:** `asyncio.gather` + `asyncio.to_thread` for concurrent meal plan day generation
 - **Database:** PostgreSQL via Supabase (free hosted, persistent)
 - **Hosting:** Render (web service, webhook-based)
@@ -35,29 +35,36 @@ AGENTS.md           # This file
 All logic lives in `bot.py` as a single-file application. There is no module
 structure. The file is organized into these sections:
 
-1. **Config & constants** - env vars, defaults, system/vision/profile prompts, water schedule
+1. **Config & constants** - env vars, defaults, `SYSTEM_PROMPT`, `VISION_PROMPT`,
+   `PREFLIGHT_PROMPT`, `MEALPLAN_PROMPT`, `WATER_SCHEDULE`, `DIET_PREF_COLUMNS`,
+   `_HELP_QUICK_START`, `_groq_with_retry()`.
 2. **Database helpers** - `db_connect()`, `db_init()`, CRUD functions for meals,
-   water, limits, profiles, diet_prefs, meal_plans, and reminder_chats tables. Includes migration logic
-   for adding macro columns to older databases.
-3. **AI helpers** - `estimate_calories()`, `estimate_calories_from_photo()`,
-   `calculate_recommendations()`, `generate_meal_plan()`, `scale_macros()`,
-   `compute_streak()`, `resize_image_if_needed()`, `_parse_ai_json()`, `format_reply()`
+   water, limits, profiles, diet_prefs, meal_plans, weight_history, and
+   reminder_chats tables. `db_init()` is idempotent and includes a safe
+   `ALTER TABLE IF NOT EXISTS` migration for the `body_fat_pct` profile column.
+3. **AI helpers** - `_parse_ai_json()`, `_validate_meal_plan_macros()`,
+   `_progress_bar()`, `_confidence_icon()`, `_truncate()`,
+   `preflight_meal_input()` (cheap input validator),
+   `estimate_calories()` (text), `estimate_calories_from_photo()` (vision),
+   `resize_image_if_needed()`, `calculate_recommendations()` (TDEE/BMR),
+   `scale_macros()`, `compute_streak()`, `generate_meal_plan()`, `format_reply()`.
 4. **Command handlers** - async functions for `/start`, `/help`, `/profile`,
    `/myprofile`, `/macros`, `/today`, `/week`, `/history`, `/delmeal`, `/stats`,
    `/setlimit`, `/limit`, `/water`, `/watertoday`, `/reminders`, `/weight`,
    `/reset`, `/goal`, `/schedule`, `/exclude`, `/budget`, `/mealplan`, `/shoplist`,
-   `/diet`, plus `reset_all_callback` (inline keyboard handler)
+   `/diet`, `/try`, `/export`, plus all callback handlers.
 5. **Meal handler** - `handle_meal()` processes any non-command text message
-6. **Photo handler** - `handle_photo()` downloads the photo, sends to vision model
-7. **Water reminder job** - `send_water_reminder()` runs on a daily schedule
-8. **Main** - wires handlers, registers scheduled jobs, starts webhook or polling
+   (preflight + estimation pipeline).
+6. **Photo handler** - `handle_photo()` downloads the photo, sends to vision model.
+7. **Water reminder job** - `send_water_reminder()` runs on a daily schedule.
+8. **Main** - wires handlers, registers scheduled jobs, starts webhook or polling.
 
 ## Database Schema
 Eight tables in PostgreSQL (Supabase):
 
 - **meals** - `id` (PK), `user_id`, `username`, `chat_id`, `meal_text`, `calories`, `protein_g`, `fat_g`, `carbs_g`, `created_at`
 - **limits** - `user_id` (PK), `daily_limit`, `daily_protein_g`, `daily_fat_g`, `daily_carbs_g`
-- **profiles** - `user_id` (PK), `height_cm`, `weight_kg`, `age`, `gender`, `activity`, `rec_calories`, `rec_protein_g`, `rec_fat_g`, `rec_carbs_g`
+- **profiles** - `user_id` (PK), `height_cm`, `weight_kg`, `age`, `gender`, `activity`, `rec_calories`, `rec_protein_g`, `rec_fat_g`, `rec_carbs_g`, `body_fat_pct`
 - **water** - `id` (PK), `user_id`, `username`, `chat_id`, `amount_ml`, `created_at`
 - **reminder_chats** - `chat_id` (PK)
 - **diet_prefs** - `user_id` (PK), `goal`, `schedule` (JSON), `excludes` (JSON), `budget_amount`, `budget_currency`
@@ -65,6 +72,10 @@ Eight tables in PostgreSQL (Supabase):
 - **weight_history** - `id` (PK), `user_id`, `weight_kg`, `recorded_at`
 
 All timestamps are ISO 8601 UTC. Day boundaries are midnight UTC.
+
+Older deployments may still have residual columns (`profiles.language`,
+`profiles.user_timezone`) and a `subscriptions` table from previous versions.
+The bot ignores them — they were left in place to avoid destructive migrations.
 
 ## Environment Variables
 | Variable | Required | Description |
@@ -76,12 +87,24 @@ All timestamps are ISO 8601 UTC. Day boundaries are midnight UTC.
 | `DATABASE_URL` | Yes | PostgreSQL connection string from Supabase |
 
 ## Key Behaviors
-- Every non-command text message is treated as a meal description and sent to the
-  AI for calorie and macro estimation.
+- Every non-command text message is treated as a meal description. It first
+  passes through `preflight_meal_input()` (cheap 8b-instant model), which
+  classifies the input and decides:
+    - `non_food` → bot replies with a hint and ignores the message.
+    - `needs_clarification` → bot asks a targeted question (e.g. "Did you mean
+      **egg**? How was it cooked — boiled, fried, or scrambled?") and stores
+      the original input in `context.user_data["pending_meal"]`. The next
+      message is concatenated as `"original (reply)"` and sent straight to
+      estimation, skipping preflight.
+    - `ok` → bot proceeds to the heavy 70b `estimate_calories()` call.
+  Preflight results are cached in `_PREFLIGHT_CACHE` (FIFO, max 200). If
+  preflight fails (Groq error, malformed JSON), the bot falls through to
+  estimation rather than blocking the user.
 - Photo messages are analyzed using Groq's vision model
   (`meta-llama/llama-4-scout-17b-16e-instruct`) to identify food items and
   estimate calories/macros. Captions are passed as extra context. Photos >800 KB
   are resized to 1024px / quality-reduced before base64 encoding via `resize_image_if_needed()`.
+  Photos do not run through preflight — vision input is its own classifier.
 - The AI returns JSON with per-item calories, macros (P/F/C), portion sizes, and
   per-100g values for both raw and cooked.
 - Each meal reply includes the user's daily running total for calories and macros
@@ -91,7 +114,6 @@ All timestamps are ISO 8601 UTC. Day boundaries are midnight UTC.
   using the average of Mifflin-St Jeor and Harris-Benedict (revised). If a 6th arg
   `body_fat%` is provided, Katch-McArdle is also included in the average. Results are
   applied immediately via `set_targets()`. Profile response shows per-formula BMR breakdown.
-- `PROFILE_PROMPT` has been removed — TDEE is now deterministic Python math.
 - Users can update weight alone with `/weight <kg>` without re-running `/profile`.
   Weight is logged to `weight_history`; daily water target updates automatically.
 - Water daily target is weight-based: `min(weight_kg * 35, 3500)` ml when profile
@@ -99,15 +121,12 @@ All timestamps are ISO 8601 UTC. Day boundaries are midnight UTC.
 - When `/setlimit` changes the calorie target, macro targets are scaled
   proportionally based on the original AI recommendations from the profile.
 - Water reminders are sent at 11:00, 14:00, 16:00, 18:00, 20:00 UTC to chats
-  that have opted in via `/reminders on`.
+  that have opted in via `/reminders on`. Reminder times always display as
+  `HH:MM UTC` — there is no per-user timezone setting.
 - `/reset all` shows an inline keyboard confirmation (2 buttons) before deleting.
   `callback_data` encodes the owner's `user_id` to prevent cross-user abuse in groups.
 - `DIET_PREF_COLUMNS` frozenset allowlists column names in `update_diet_pref()` to
   prevent SQL injection from crafted kwargs.
-- Non-food text is filtered by `_looks_like_food()` before calling Groq. Short food
-  descriptions (1–3 words, no quantity/cooking method) trigger `_needs_clarification()`,
-  which sends a specific question and stores the original text in `context.user_data["pending_meal"]`.
-  The next message combines both and calls the AI.
 - `_truncate(text, limit=40)` appends `…` when meal text is cut in `/today`, `/history`, `/delmeal`.
 - `/today` uses inline keyboard buttons (one per meal) for one-tap deletion via
   `delmeal_inline_callback`. Callback pattern: `delmeal_inline:<meal_id>:<user_id>`.
@@ -116,14 +135,6 @@ All timestamps are ISO 8601 UTC. Day boundaries are midnight UTC.
 - `/diet` shows action hints for missing fields (e.g., "not set → /schedule ...").
 - `/help` sends a compact quick-start (`_HELP_QUICK_START` constant) by default;
   `/help full` sends the full reference as a second message.
-- **Multi-language support (EN/RU):** `TRANSLATIONS` dict + `t(lang, key, **kwargs)` helper. Armenian (hy) support removed pending proper translation.
-- **Premium subscription (Telegram Stars):** `subscriptions` table stores plan/expires_at/granted_by. `is_premium(user_id)` checks owner (`BOT_OWNER_ID` env) and DB. `activate_premium(user_id, days, granted_by, charge_id)` and `revoke_premium(user_id)` manage subscriptions. `/upgrade` sends a 299-Star recurring invoice. Free tier: 5 text meals/day; premium unlocks unlimited logging, photo analysis, /mealplan, /export. Owner commands `/grant` and `/revoke` are hidden (not in BotCommand list). Payment flow: `PreCheckoutQueryHandler` auto-approves → `filters.SUCCESSFUL_PAYMENT` activates 30-day premium. `FREE_DAILY_MEAL_LIMIT=5`, `PREMIUM_STARS_PRICE=299`, `PREMIUM_SUBSCRIPTION_PERIOD=2592000`.
-  `get_lang(update, context)` resolves language: session cache (`context.user_data["lang"]`) →
-  DB (`profiles.language`) → Telegram `language_code` auto-detection → default "en".
-  `/language` command shows 3 flag buttons; `lang_set_callback` saves to DB + session cache.
-  `profiles.language TEXT DEFAULT 'en'` added via `ALTER TABLE IF NOT EXISTS`.
-  Non-English users skip English food-intent guard and clarification flow (Groq handles multilingual input).
-  `format_reply`, `_build_water_status_text`, `_water_quick_keyboard` all accept `lang` parameter.
 - `/start` shows numbered onboarding steps with a "Quick Start Guide" inline button
   handled by `help_quickstart_callback()`.
 - `/reminders` (no arg) shows current ON/OFF status + Turn On/Turn Off buttons;
@@ -141,29 +152,21 @@ All timestamps are ISO 8601 UTC. Day boundaries are midnight UTC.
 - `generate_meal_plan` is `async def`; 3 day-group Groq calls run concurrently via
   `asyncio.gather(asyncio.to_thread(...) × 3)`; shopping list call remains sequential.
   `mealplan_command` uses `await generate_meal_plan(...)`. Cuts ~30s → ~10s.
-- `_groq_with_retry(func, **kwargs)` wraps all 4 Groq call sites; catches
+- `_groq_with_retry(func, **kwargs)` wraps all Groq call sites; catches
   `GroqRateLimitError`, sleeps 2s (`_stdlib_time.sleep`), retries once, re-raises on second failure.
 - `_MEAL_CACHE` dict (max 200 entries, FIFO eviction) caches `estimate_calories` results
   by normalized meal text. Photos and mealplan calls are not cached.
+  `_PREFLIGHT_CACHE` is the same shape for `preflight_meal_input` results.
 - `/export [days]` sends two CSV files (meals + water) via `reply_document`. Uses
   stdlib `csv` + `io.StringIO`/`io.BytesIO`. Default 30 days, max 365.
-- `/timezone` command: no-arg shows `ReplyKeyboardMarkup` with location share button;
-  arg can be IANA name (`Europe/Berlin`) or UTC offset (`UTC+3`). Saves to
-  `profiles.user_timezone` (TEXT column, added via `ALTER TABLE IF NOT EXISTS`).
-- `handle_location` uses `_tf.timezone_at(lat, lng)` (`TimezoneFinder` singleton)
-  → IANA name → `save_user_timezone()`. Sends `ReplyKeyboardRemove()` on all paths.
-- `get_user_timezone(user_id)` returns `ZoneInfo` or `timezone.utc` (fallback).
-- `_format_time_in_tz(hour, minute, tz)` converts UTC schedule times to local display.
-- `/reminders` (all paths) now shows schedule in local time via `_format_time_in_tz`.
-- `handle_location` registered **before** TEXT catch-all in `main()`.
-- `/history` now includes ⬅️/➡️ day navigation buttons; `history_nav_callback`
+- `/history` includes ⬅️/➡️ day navigation buttons; `history_nav_callback`
   fetches the new day's meals and edits the message in-place.
 - Callback data patterns: all embed user_id for ownership checks; chat_id uses
   `-?\d+` to handle negative group chat IDs. All patterns under 44 chars (64-byte limit).
 - Meal estimation responses use Telegram HTML parse mode (`parse_mode="HTML"`). All
   user-supplied text in replies is escaped via `_html()`. `format_reply()` returns
   `(text, parse_mode)` tuple. Progress bars rendered via `_progress_bar()`.
-- Meal calorie estimates now include `fiber_g`, `confidence` (high/medium/low), and
+- Meal calorie estimates include `fiber_g`, `confidence` (high/medium/low), and
   `context_hint` (home_cooked/restaurant/branded/unknown) from the AI response.
   Restaurant meals prompt the model to assume 20-30% larger portions.
 - After meal plan generation, `_validate_meal_plan_macros()` checks each day against
@@ -173,7 +176,7 @@ All timestamps are ISO 8601 UTC. Day boundaries are midnight UTC.
 ## Bot Commands Reference
 | Command | Description | Example |
 |---------|-------------|---------|
-| *(plain text)* | Estimate calories and macros for a meal | `chicken salad with rice` |
+| *(plain text)* | AI preflight then estimate calories and macros | `chicken salad with rice` |
 | *(photo)* | Estimate from a meal photo | Send a photo, optionally with caption |
 | `/start` | Welcome message | `/start` |
 | `/help` | Full command list with examples | `/help` |
@@ -182,7 +185,7 @@ All timestamps are ISO 8601 UTC. Day boundaries are midnight UTC.
 | `/macros` | Today's macro progress (P/F/C) | `/macros` |
 | `/today` | Today's meals with IDs, calories, and macros | `/today` |
 | `/week` | 7-day calorie and macro summary | `/week` |
-| `/history [YYYY-MM-DD]` | Meals for a past date (default: yesterday) | `/history 2025-04-10` |
+| `/history [YYYY-MM-DD]` | Meals for a past date (default: today) | `/history 2025-04-10` |
 | `/delmeal <id>` | Delete a specific logged meal by ID | `/delmeal 42` |
 | `/stats` | Logging streaks and 30-day statistics | `/stats` |
 | `/setlimit <kcal>` | Override calorie limit; macros scale proportionally | `/setlimit 2200` |
@@ -202,6 +205,8 @@ All timestamps are ISO 8601 UTC. Day boundaries are midnight UTC.
 | `/mealplan` | Generate 7-day meal plan with shopping list | `/mealplan` |
 | `/shoplist` | Re-show last shopping list | `/shoplist` |
 | `/diet` | Show current diet preferences | `/diet` |
+| `/try <description>` | Estimate calories without saving | `/try 2 eggs and toast` |
+| `/export [days]` | Export meals and water as CSV files | `/export 30` |
 
 ## Running Locally
 ```bash
@@ -222,8 +227,10 @@ automatically on startup.
   see non-command messages in group chats.
 - **Render free tier:** The service spins down after 15 min idle (~30s cold start).
   Use UptimeRobot to keep it alive. Data persists in Supabase across redeploys.
-- **Groq rate limits:** Free tier allows 30 req/min. No retry logic is implemented;
-  errors are caught and a fallback message is sent to the user.
+- **Groq rate limits:** Free tier allows 30 req/min. `_groq_with_retry` catches
+  one rate-limit error and retries after 2s; second failure surfaces to the user.
+  The preflight call adds one extra Groq request per fresh text input — budget
+  for it under sustained load.
 
 ## Extending the Bot
 - To add a new command: write an async handler function, register it with
