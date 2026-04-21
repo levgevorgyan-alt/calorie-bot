@@ -4,33 +4,25 @@ import io
 import json
 import logging
 import os
-import re
 import sys
 import time as _stdlib_time
 import base64
 from datetime import datetime, timedelta, time, timezone
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from groq import Groq, RateLimitError as GroqRateLimitError
 import psycopg2
 import psycopg2.extras
 from PIL import Image
-from timezonefinder import TimezoneFinder
 from telegram import (
     Update,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
-    KeyboardButton,
-    LabeledPrice,
-    ReplyKeyboardMarkup,
-    ReplyKeyboardRemove,
 )
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
     CommandHandler,
     MessageHandler,
-    PreCheckoutQueryHandler,
     ContextTypes,
     filters,
 )
@@ -50,15 +42,7 @@ DATABASE_URL = os.environ["DATABASE_URL"]
 DEFAULT_CALORIE_LIMIT = 1800
 DAILY_WATER_TARGET_ML = 2000
 
-# Premium / subscription settings
-BOT_OWNER_ID = int(os.environ.get("BOT_OWNER_ID", "0"))
-FREE_DAILY_MEAL_LIMIT = 5
-PREMIUM_STARS_PRICE = 299           # Stars per month (~$3.89)
-PREMIUM_DAYS = 30  # days of premium per payment
-
 groq_client = Groq(api_key=GROQ_API_KEY)
-
-_tf = TimezoneFinder()  # load timezone data once at startup (~50ms)
 
 
 def _groq_with_retry(func, **kwargs):
@@ -123,7 +107,7 @@ VISION_PROMPT = (
     "Return ONLY valid JSON with no extra text.\n\n"
     "ANALYSIS APPROACH:\n"
     "1. IDENTIFY every food item visible including garnishes, sauces, visible oils.\n"
-    "2. SCALE using reference objects — standard dinner plate: 26-28 cm diameter; "
+    "2. SCALE using reference objects \u2014 standard dinner plate: 26-28 cm diameter; "
     "fork: ~19 cm; tablespoon: ~15 ml. If no reference is visible, use defaults below.\n"
     "3. DEPTH: account for volume, not just surface. A bowl may hold 50% more than it looks.\n"
     "4. COOKING METHOD from visual cues (must change your calorie output):\n"
@@ -147,7 +131,27 @@ VISION_PROMPT = (
     "'low'=unclear food or heavily mixed dish. Add 'note' for unclear items."
 )
 
-# PROFILE_PROMPT removed — replaced by pure Python BMR calculation in calculate_recommendations()
+PREFLIGHT_PROMPT = (
+    "You are a meal-input validator for a calorie-tracking bot. The user typed a "
+    "short message. Decide ONE of three outcomes and reply with JSON only.\n\n"
+    "1. {\"intent\": \"non_food\"}\n"
+    "   Use when the message is chatter, a greeting, a question, or unrelated to food.\n\n"
+    "2. {\"intent\": \"needs_clarification\", \"suggested\": \"<corrected food name "
+    "or null>\", \"question\": \"<one short clarifying question>\"}\n"
+    "   Use when:\n"
+    "     - the input has an obvious typo or shorthand (e.g. \"eg\" \u2192 \"egg\", "
+    "\"chkn\" \u2192 \"chicken\"); set \"suggested\" to the correction.\n"
+    "     - a food is named but preparation or quantity is missing (cooking method, "
+    "portion size, with/without oil/butter, sauce, etc.).\n"
+    "   The question must be specific to the food, e.g. \"How were the eggs cooked "
+    "\u2014 boiled, fried, or scrambled?\" or \"How much chicken, and grilled or "
+    "fried?\". Keep it under 25 words.\n\n"
+    "3. {\"intent\": \"ok\"}\n"
+    "   Use when the message clearly describes one or more foods with enough detail "
+    "to estimate calories (mentions quantity AND/OR cooking method, or names a fully "
+    "specified dish like \"big mac\" or \"caesar salad with chicken\").\n\n"
+    "Reply with raw JSON only. No prose, no markdown fences."
+)
 
 ACTIVITY_LEVELS = {
     "sedentary": "little or no exercise",
@@ -168,321 +172,6 @@ _GOAL_LABELS = {
     "maintain":    "\u2696\ufe0f Maintain",
     "gain_muscle": "\U0001f4aa Gain Muscle",
 }
-
-# ---------------------------------------------------------------------------
-# Multi-language support
-# ---------------------------------------------------------------------------
-
-SUPPORTED_LANGUAGES = {"en", "ru"}
-DEFAULT_LANGUAGE = "en"
-
-TRANSLATIONS: dict = {
-    "en": {
-        "start_msg": (
-            "\U0001f44b Hi {name}! I track your calories and macros.\n\n"
-            "1\ufe0f\u20e3 <b>Set your profile</b> for personalized targets:\n"
-            "   <code>/profile 180 75 28 male moderate</code>\n\n"
-            "2\ufe0f\u20e3 <b>Log a meal</b> \u2014 just type what you ate:\n"
-            "   <code>2 eggs, toast with butter</code>\n\n"
-            "3\ufe0f\u20e3 <b>Check your day:</b> /today\n\n"
-            "Or send a \U0001f4f7 photo of your meal anytime!"
-        ),
-        "btn_quickstart": "\U0001f4d6 Quick Start Guide",
-        "estimate_header": "\U0001f37d <b>Calorie Estimate</b>",
-        "meal_total": "<b>Meal total:</b> ~{total} kcal | P: {p}g | F: {f}g | C: {c}g | Fiber: {fib}g",
-        "today_progress": "\n\U0001f4ca <b>Today:</b> {cal} / {limit} kcal\n{bar} ({remaining} remaining)",
-        "over_limit": "\n\u26a0\ufe0f <b>Over limit!</b> {cal} / {limit} kcal\n{bar} (+{over} over)",
-        "confidence_legend": "\n<i>\u2705 high confidence \u00b7 \U0001f7e1 estimated \u00b7 \u26a0\ufe0f uncertain</i>",
-        "today_header": "\U0001f4cb <b>Today's meals:</b>",
-        "today_empty": "No meals logged today. Just type what you ate!",
-        "today_total": "\n<b>Total:</b> {cal} kcal | P: {p}g | F: {f}g | C: {c}g",
-        "today_remaining": "\U0001f4ca {cal} / {limit} kcal ({remaining} remaining)",
-        "today_over": "\u26a0\ufe0f <b>Over limit!</b> {cal} / {limit} kcal (+{over} over)",
-        "btn_delete": "\U0001f5d1 Delete: {name}",
-        "water_status_remaining": "\U0001f4a7 Today: {total} / {target}ml ({remaining}ml remaining)",
-        "water_status_done": "\u2705 Today: {total} / {target}ml \u2014 target reached!",
-        "water_logged": "\U0001f4a7 Logged {amount}ml.\n{status}",
-        "water_quick_header": "\U0001f4a7 Quick water log\n{status}",
-        "water_quick_logged": "\u2705 Logged {amount}ml!\n{status}",
-        "btn_water": "\U0001f4a7 {ml}ml",
-        "water_invalid_number": "Please provide a number. Example: /water 500",
-        "water_invalid_range": "Amount must be between 1 and 5000 ml.",
-        "reminders_status": "\U0001f4a7 Water reminders are currently <b>{status}</b> for this chat.\n\nSchedule:\n{schedule}",
-        "reminders_on": "ON \u2705",
-        "reminders_off": "OFF",
-        "reminders_enabled": "\U0001f4a7 Water reminders enabled for this chat!\n\nSchedule:\n{schedule}",
-        "reminders_disabled": "Water reminders disabled for this chat.",
-        "btn_turn_on": "Turn On",
-        "btn_turn_off": "Turn Off",
-        "reset_choose": "What would you like to reset?",
-        "reset_meals_done": "\u2705 Today's meal logs cleared.",
-        "reset_water_done": "\u2705 Today's water logs cleared.",
-        "reset_all_confirm": (
-            "Are you sure? This will permanently delete ALL your data:\n"
-            "meals, water, profile, diet preferences, calorie limits, and weight history.\n\n"
-            "This cannot be undone."
-        ),
-        "reset_all_done": "\u2705 All your data has been permanently deleted.",
-        "reset_cancelled": "Reset cancelled. Your data is safe.",
-        "btn_reset_meals": "\U0001f5d1 Today's Meals",
-        "btn_reset_water": "\U0001f5d1 Today's Water",
-        "btn_reset_all": "\u26a0\ufe0f Everything",
-        "btn_yes_delete": "Yes, delete everything",
-        "btn_cancel": "Cancel",
-        "goal_current": "\U0001f3af Current goal: <b>{goal}</b> ({desc})\nSelect a new goal:",
-        "goal_updated": "\u2705 Goal updated: <b>{goal}</b> ({desc})\nSelect a new goal:",
-        "week_header": "\U0001f4c5 Weekly Summary:",
-        "week_empty": "No data for the past 7 days.",
-        "week_over": "+{diff} over",
-        "week_under": "{diff} under",
-        "week_total": "Week total: {total} kcal",
-        "week_avg_macros": "Daily avg macros: P: {p}g | F: {f}g | C: {c}g",
-        "setlimit_updated_macros": "Daily limit updated: {old} \u2192 {new} kcal\nMacros scaled: P: {p}g | F: {f}g | C: {c}g",
-        "setlimit_updated": "Daily calorie limit updated: {old} \u2192 {new} kcal",
-        "history_empty": "No meals logged for {date}.",
-        "history_header": "\U0001f4cb Meals for {date}:",
-        "stats_header": "\U0001f4ca Your Stats (last 30 days):\n",
-        "stats_empty": "No meal data yet. Start logging meals to see your stats!",
-        "weight_updated": "\u2705 Weight updated to {weight} kg.\n\nNew water target: {water_target} ml/day\nRun /profile to recalculate calorie & macro recommendations.",
-        "export_preparing": "\u23f3 Preparing your export for the last {days} days...",
-        "export_empty": "No data found for the last {days} days. Start logging meals and water!",
-        "export_meals_caption": "Meals log \u2014 last {days} days ({n} entries)",
-        "export_water_caption": "Water log \u2014 last {days} days ({n} entries)",
-        "timezone_set": "\u2705 Timezone set to <b>{tz}</b> ({offset}).\nReminder times will now display in your local time.",
-        "timezone_not_set": "not set (using UTC)",
-        "btn_share_location": "\U0001f4cd Share my location",
-        "location_set": "\u2705 Timezone detected: <b>{tz}</b> ({offset}).\nReminder times will now display in your local time.\nUse /reminders to see the updated schedule.",
-        "location_no_tz": "Could not detect timezone from this location.\nSet manually: /timezone Europe/Berlin",
-        "location_no_profile": "Please set your profile first with /profile, then share your location.",
-        "meal_parse_error": "Sorry, I couldn't parse the calorie data. Try rephrasing your meal.",
-        "meal_error": "Something went wrong. Please try again in a moment.",
-        "photo_parse_error": "Sorry, I couldn't identify the food in this photo. Try adding a caption describing the meal.",
-        "photo_error": "Something went wrong analyzing the photo. Please try again.",
-        "not_food": "I track food and calories. Send me a meal description like:\n  chicken salad with rice\n  2 eggs, toast\n\nType /help to see all commands.",
-        "clarify_fallback": "\U0001f37d Can you add a bit more detail?\nCooking method, quantity, or ingredients help a lot:\n  e.g. *2 boiled eggs* \u00b7 *150g grilled chicken* \u00b7 *200g fried rice*",
-        "language_set_en": "\u2705 Language set to <b>English</b>.",
-        "language_set_ru": "\u2705 Language set to <b>Russian</b>.",
-        "language_set_hy": "\u2705 Language set to <b>Armenian</b>.",
-        "language_choose": "Choose your language:",
-        "btn_lang_en": "\U0001f1ec\U0001f1e7 English",
-        "btn_lang_ru": "\U0001f1f7\U0001f1fa \u0420\u0443\u0441\u0441\u043a\u0438\u0439",
-        "btn_lang_hy": "\U0001f1e6\U0001f1f2 \u540d\u56fd",
-        "mealplan_generating": "\u2699\ufe0f Generating your 7-day meal plan...\nThis takes ~10 seconds (3 parallel AI calls + shopping list). Please wait.",
-        "mealplan_error_json": "Sorry, I couldn't generate a valid meal plan. Please try again.",
-        "mealplan_error": "Something went wrong generating the meal plan. Please try again.",
-        "delmeal_not_found": "Meal #{id} not found (or it doesn't belong to you).",
-        "delmeal_done": "\u2705 Deleted meal #{id}: {name} (~{cal} kcal)",
-        "delmeal_cb_not_found": "Meal #{id} not found (already deleted?).",
-        "delmeal_cb_deleted_toast": "Deleted: {name}",
-        "delmeal_cb_deleted_edit": "\u2705 Deleted: {name}",
-        "btn_invalid": "Invalid request.",
-        "btn_not_yours": "This button isn't for you.",
-        "reminder_msg": "\U0001f4a7 Water Reminder!\nTime to drink ~{amount}ml of water.\nUse /water {amount} to log it.",
-        # Premium / subscription
-        "free_limit_reached": (
-            "You've used all {limit} free meal logs for today. \u2b50\n\n"
-            "Upgrade to Premium for unlimited meals, photo analysis, and meal plans:\n"
-            "/upgrade"
-        ),
-        "premium_photo_gate": (
-            "\U0001f4f7 Photo meal analysis is a Premium feature. \u2b50\n\n"
-            "Premium unlocks: unlimited meals \u00b7 photo analysis \u00b7 7-day meal plans \u00b7 CSV export\n"
-            "/upgrade"
-        ),
-        "premium_mealplan_gate": (
-            "\U0001f957 Meal plan generation is a Premium feature. \u2b50\n\n"
-            "Premium unlocks: unlimited meals \u00b7 photo analysis \u00b7 7-day meal plans \u00b7 CSV export\n"
-            "/upgrade"
-        ),
-        "premium_export_gate": "\U0001f4ca CSV export is a Premium feature. \u2b50\n/upgrade",
-        "premium_active": (
-            "\u2b50 <b>Premium Active</b>\n"
-            "Expires: {date}\n\n"
-            "Enjoying: unlimited meals \u00b7 photos \u00b7 meal plans \u00b7 export"
-        ),
-        "premium_lifetime": "\U0001f451 <b>Lifetime Premium</b> \u2014 all features unlocked forever.",
-        "premium_free": (
-            "You're on the <b>Free plan</b>.\n\n"
-            "Today: {count}/{limit} meal logs used\n\n"
-            "Free includes: {limit} text meals/day \u00b7 all tracking commands\n"
-            "Premium adds: unlimited meals \u00b7 photos \u00b7 meal plans \u00b7 export\n\n"
-            "/upgrade \u2014 {price} \u2b50 / 30 days"
-        ),
-        "premium_activated": (
-            "\u2705 <b>Premium activated!</b>\n\n"
-            "You now have unlimited meal logging, photo analysis, "
-            "7-day meal plans, and CSV export.\n"
-            "Valid for 30 days. Use /upgrade again to renew. Thank you! \u2b50"
-        ),
-        "upgrade_title": "\u2b50 Calorie Bot Premium",
-        "upgrade_description": (
-            "Unlimited meal logging \u00b7 Photo meal analysis \u00b7 "
-            "7-day AI meal plans \u00b7 CSV data export"
-        ),
-        "grant_success": "\u2705 Premium granted to user {user_id} for {days} days.",
-        "grant_lifetime": "\u2705 Lifetime premium granted to user {user_id}.",
-        "revoke_success": "\u2705 Premium revoked from user {user_id}.",
-        "owner_only": "\u26d4 This command is only available to the bot owner.",
-        "grant_usage": "Usage: /grant <user_id> [days]\nExamples:\n  /grant 123456789\n  /grant 123456789 30",
-        "revoke_usage": "Usage: /revoke <user_id>",
-        "already_premium": "\u2b50 You already have an active Premium subscription!\n\nUse /premium to check your status.",
-    },
-    "ru": {
-        "start_msg": (
-            "\U0001f44b \u041f\u0440\u0438\u0432\u0435\u0442, {name}! \u042f \u0441\u043b\u0435\u0436\u0443 \u0437\u0430 \u043a\u0430\u043b\u043e\u0440\u0438\u044f\u043c\u0438 \u0438 \u043c\u0430\u043a\u0440\u043e\u0441\u0430\u043c\u0438.\n\n"
-            "1\ufe0f\u20e3 <b>\u041d\u0430\u0441\u0442\u0440\u043e\u0439\u0442\u0435 \u043f\u0440\u043e\u0444\u0438\u043b\u044c</b> \u0434\u043b\u044f \u043f\u0435\u0440\u0441\u043e\u043d\u0430\u043b\u044c\u043d\u044b\u0445 \u0446\u0435\u043b\u0435\u0439:\n"
-            "   <code>/profile 180 75 28 male moderate</code>\n\n"
-            "2\ufe0f\u20e3 <b>\u0417\u0430\u043f\u0438\u0441\u044b\u0432\u0430\u0439\u0442\u0435 \u043f\u0440\u0438\u0451\u043c\u044b \u043f\u0438\u0449\u0438</b> \u2014 \u043f\u0440\u043e\u0441\u0442\u043e \u043d\u0430\u043f\u0438\u0448\u0438\u0442\u0435 \u0447\u0442\u043e \u0435\u043b\u0438:\n"
-            "   <code>2 \u044f\u0439\u0446\u0430, \u0442\u043e\u0441\u0442 \u0441 \u043c\u0430\u0441\u043b\u043e\u043c</code>\n\n"
-            "3\ufe0f\u20e3 <b>\u041f\u0440\u043e\u0432\u0435\u0440\u044f\u0439\u0442\u0435 \u0434\u0435\u043d\u044c:</b> /today\n\n"
-            "\u0418\u043b\u0438 \u043e\u0442\u043f\u0440\u0430\u0432\u044c\u0442\u0435 \U0001f4f7 \u0444\u043e\u0442\u043e \u0435\u0434\u044b \u0432 \u043b\u044e\u0431\u043e\u0435 \u0432\u0440\u0435\u043c\u044f!"
-        ),
-        "btn_quickstart": "\U0001f4d6 \u0411\u044b\u0441\u0442\u0440\u044b\u0439 \u0441\u0442\u0430\u0440\u0442",
-        "estimate_header": "\U0001f37d <b>\u041e\u0446\u0435\u043d\u043a\u0430 \u043a\u0430\u043b\u043e\u0440\u0438\u0439</b>",
-        "meal_total": "<b>\u0418\u0442\u043e\u0433\u043e:</b> ~{total} \u043a\u043a\u0430\u043b | \u0411: {p}\u0433 | \u0416: {f}\u0433 | \u0423: {c}\u0433 | \u041a\u043b\u0435\u0442\u0447\u0430\u0442\u043a\u0430: {fib}\u0433",
-        "today_progress": "\n\U0001f4ca <b>\u0421\u0435\u0433\u043e\u0434\u043d\u044f:</b> {cal} / {limit} \u043a\u043a\u0430\u043b\n{bar} (\u043e\u0441\u0442\u0430\u043b\u043e\u0441\u044c {remaining})",
-        "over_limit": "\n\u26a0\ufe0f <b>\u041f\u0440\u0435\u0432\u044b\u0448\u0435\u043d \u043b\u0438\u043c\u0438\u0442!</b> {cal} / {limit} \u043a\u043a\u0430\u043b\n{bar} (+{over} \u0441\u0432\u0435\u0440\u0445)",
-        "confidence_legend": "\n<i>\u2705 \u0432\u044b\u0441\u043e\u043a\u0430\u044f \u0442\u043e\u0447\u043d\u043e\u0441\u0442\u044c \u00b7 \U0001f7e1 \u043e\u0446\u0435\u043d\u043a\u0430 \u00b7 \u26a0\ufe0f \u043d\u0435\u0442\u043e\u0447\u043d\u043e</i>",
-        "today_header": "\U0001f4cb <b>\u0421\u0435\u0433\u043e\u0434\u043d\u044f\u0448\u043d\u0438\u0435 \u043f\u0440\u0438\u0451\u043c\u044b \u043f\u0438\u0449\u0438:</b>",
-        "today_empty": "\u0421\u0435\u0433\u043e\u0434\u043d\u044f \u0435\u0449\u0451 \u043d\u0438\u0447\u0435\u0433\u043e \u043d\u0435 \u0437\u0430\u043f\u0438\u0441\u0430\u043d\u043e. \u041f\u0440\u043e\u0441\u0442\u043e \u043d\u0430\u043f\u0438\u0448\u0438\u0442\u0435 \u0447\u0442\u043e \u0435\u043b\u0438!",
-        "today_total": "\n<b>\u0418\u0442\u043e\u0433\u043e:</b> {cal} \u043a\u043a\u0430\u043b | \u0411: {p}\u0433 | \u0416: {f}\u0433 | \u0423: {c}\u0433",
-        "today_remaining": "\U0001f4ca {cal} / {limit} \u043a\u043a\u0430\u043b (\u043e\u0441\u0442\u0430\u043b\u043e\u0441\u044c {remaining})",
-        "today_over": "\u26a0\ufe0f <b>\u041f\u0440\u0435\u0432\u044b\u0448\u0435\u043d \u043b\u0438\u043c\u0438\u0442!</b> {cal} / {limit} \u043a\u043a\u0430\u043b (+{over} \u0441\u0432\u0435\u0440\u0445)",
-        "btn_delete": "\U0001f5d1 \u0423\u0434\u0430\u043b\u0438\u0442\u044c: {name}",
-        "water_status_remaining": "\U0001f4a7 \u0421\u0435\u0433\u043e\u0434\u043d\u044f: {total} / {target}\u043c\u043b (\u043e\u0441\u0442\u0430\u043b\u043e\u0441\u044c {remaining}\u043c\u043b)",
-        "water_status_done": "\u2705 \u0421\u0435\u0433\u043e\u0434\u043d\u044f: {total} / {target}\u043c\u043b \u2014 \u043d\u043e\u0440\u043c\u0430 \u0432\u044b\u043f\u043e\u043b\u043d\u0435\u043d\u0430!",
-        "water_logged": "\U0001f4a7 \u0417\u0430\u043f\u0438\u0441\u0430\u043d\u043e {amount}\u043c\u043b.\n{status}",
-        "water_quick_header": "\U0001f4a7 \u0411\u044b\u0441\u0442\u0440\u0430\u044f \u0437\u0430\u043f\u0438\u0441\u044c \u0432\u043e\u0434\u044b\n{status}",
-        "water_quick_logged": "\u2705 \u0417\u0430\u043f\u0438\u0441\u0430\u043d\u043e {amount}\u043c\u043b!\n{status}",
-        "btn_water": "\U0001f4a7 {ml}\u043c\u043b",
-        "water_invalid_number": "\u041f\u043e\u0436\u0430\u043b\u0443\u0439\u0441\u0442\u0430, \u0443\u043a\u0430\u0436\u0438\u0442\u0435 \u0447\u0438\u0441\u043b\u043e. \u041f\u0440\u0438\u043c\u0435\u0440: /water 500",
-        "water_invalid_range": "\u041a\u043e\u043b\u0438\u0447\u0435\u0441\u0442\u0432\u043e \u0434\u043e\u043b\u0436\u043d\u043e \u0431\u044b\u0442\u044c \u043e\u0442 1 \u0434\u043e 5000 \u043c\u043b.",
-        "reminders_status": "\U0001f4a7 \u041d\u0430\u043f\u043e\u043c\u0438\u043d\u0430\u043d\u0438\u044f \u043e \u0432\u043e\u0434\u0435 \u0441\u0435\u0439\u0447\u0430\u0441 <b>{status}</b> \u0434\u043b\u044f \u044d\u0442\u043e\u0433\u043e \u0447\u0430\u0442\u0430.\n\n\u0420\u0430\u0441\u043f\u0438\u0441\u0430\u043d\u0438\u0435:\n{schedule}",
-        "reminders_on": "\u0412\u041a\u041b\u042e\u0427\u0415\u041d\u042b \u2705",
-        "reminders_off": "\u0412\u042b\u041a\u041b\u042e\u0427\u0415\u041d\u042b",
-        "reminders_enabled": "\U0001f4a7 \u041d\u0430\u043f\u043e\u043c\u0438\u043d\u0430\u043d\u0438\u044f \u043e \u0432\u043e\u0434\u0435 \u0432\u043a\u043b\u044e\u0447\u0435\u043d\u044b!\n\n\u0420\u0430\u0441\u043f\u0438\u0441\u0430\u043d\u0438\u0435:\n{schedule}",
-        "reminders_disabled": "\u041d\u0430\u043f\u043e\u043c\u0438\u043d\u0430\u043d\u0438\u044f \u043e \u0432\u043e\u0434\u0435 \u043e\u0442\u043a\u043b\u044e\u0447\u0435\u043d\u044b \u0434\u043b\u044f \u044d\u0442\u043e\u0433\u043e \u0447\u0430\u0442\u0430.",
-        "btn_turn_on": "\u0412\u043a\u043b\u044e\u0447\u0438\u0442\u044c",
-        "btn_turn_off": "\u0412\u044b\u043a\u043b\u044e\u0447\u0438\u0442\u044c",
-        "reset_choose": "\u0427\u0442\u043e \u0441\u0431\u0440\u043e\u0441\u0438\u0442\u044c?",
-        "reset_meals_done": "\u2705 \u0421\u0435\u0433\u043e\u0434\u043d\u044f\u0448\u043d\u0438\u0435 \u043f\u0440\u0438\u0451\u043c\u044b \u043f\u0438\u0449\u0438 \u0443\u0434\u0430\u043b\u0435\u043d\u044b.",
-        "reset_water_done": "\u2705 \u0421\u0435\u0433\u043e\u0434\u043d\u044f\u0448\u043d\u0438\u0435 \u0437\u0430\u043f\u0438\u0441\u0438 \u0432\u043e\u0434\u044b \u0443\u0434\u0430\u043b\u0435\u043d\u044b.",
-        "reset_all_confirm": "\u0412\u044b \u0443\u0432\u0435\u0440\u0435\u043d\u044b? \u042d\u0442\u043e \u0443\u0434\u0430\u043b\u0438\u0442 \u0412\u0421\u0415 \u0432\u0430\u0448\u0438 \u0434\u0430\u043d\u043d\u044b\u0435:\n\u0435\u0434\u0430, \u0432\u043e\u0434\u0430, \u043f\u0440\u043e\u0444\u0438\u043b\u044c, \u043f\u0440\u0435\u0434\u043f\u043e\u0447\u0442\u0435\u043d\u0438\u044f \u0434\u0438\u0435\u0442\u044b, \u043b\u0438\u043c\u0438\u0442\u044b \u043a\u0430\u043b\u043e\u0440\u0438\u0439 \u0438 \u0438\u0441\u0442\u043e\u0440\u0438\u044f \u0432\u0435\u0441\u0430.\n\n\u041e\u0442\u043c\u0435\u043d\u0438\u0442\u044c \u043d\u0435\u0432\u043e\u0437\u043c\u043e\u0436\u043d\u043e.",
-        "reset_all_done": "\u2705 \u0412\u0441\u0435 \u0432\u0430\u0448\u0438 \u0434\u0430\u043d\u043d\u044b\u0435 \u0443\u0434\u0430\u043b\u0435\u043d\u044b.",
-        "reset_cancelled": "\u0421\u0431\u0440\u043e\u0441 \u043e\u0442\u043c\u0435\u043d\u0451\u043d. \u0412\u0430\u0448\u0438 \u0434\u0430\u043d\u043d\u044b\u0435 \u0432 \u0431\u0435\u0437\u043e\u043f\u0430\u0441\u043d\u043e\u0441\u0442\u0438.",
-        "btn_reset_meals": "\U0001f5d1 \u0421\u0435\u0433\u043e\u0434\u043d\u044f\u0448\u043d\u044f\u044f \u0435\u0434\u0430",
-        "btn_reset_water": "\U0001f5d1 \u0421\u0435\u0433\u043e\u0434\u043d\u044f\u0448\u043d\u044f\u044f \u0432\u043e\u0434\u0430",
-        "btn_reset_all": "\u26a0\ufe0f \u0412\u0441\u0451",
-        "btn_yes_delete": "\u0414\u0430, \u0443\u0434\u0430\u043b\u0438\u0442\u044c \u0432\u0441\u0451",
-        "btn_cancel": "\u041e\u0442\u043c\u0435\u043d\u0430",
-        "goal_current": "\U0001f3af \u0422\u0435\u043a\u0443\u0449\u0430\u044f \u0446\u0435\u043b\u044c: <b>{goal}</b> ({desc})\n\u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u043d\u043e\u0432\u0443\u044e \u0446\u0435\u043b\u044c:",
-        "goal_updated": "\u2705 \u0426\u0435\u043b\u044c \u043e\u0431\u043d\u043e\u0432\u043b\u0435\u043d\u0430: <b>{goal}</b> ({desc})\n\u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u043d\u043e\u0432\u0443\u044e \u0446\u0435\u043b\u044c:",
-        "week_header": "\U0001f4c5 \u0421\u0432\u043e\u0434\u043a\u0430 \u0437\u0430 \u043d\u0435\u0434\u0435\u043b\u044e:",
-        "week_empty": "\u041d\u0435\u0442 \u0434\u0430\u043d\u043d\u044b\u0445 \u0437\u0430 \u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0435 7 \u0434\u043d\u0435\u0439.",
-        "week_over": "+{diff} \u0441\u0432\u0435\u0440\u0445",
-        "week_under": "{diff} \u043d\u0438\u0436\u0435",
-        "week_total": "\u0418\u0442\u043e\u0433\u043e \u0437\u0430 \u043d\u0435\u0434\u0435\u043b\u044e: {total} \u043a\u043a\u0430\u043b",
-        "week_avg_macros": "\u0421\u0440\u0435\u0434\u043d\u0438\u0435 \u043c\u0430\u043a\u0440\u043e\u0441\u044b/\u0434\u0435\u043d\u044c: \u0411: {p}\u0433 | \u0416: {f}\u0433 | \u0423: {c}\u0433",
-        "setlimit_updated_macros": "\u041b\u0438\u043c\u0438\u0442 \u043e\u0431\u043d\u043e\u0432\u043b\u0451\u043d: {old} \u2192 {new} \u043a\u043a\u0430\u043b\n\u041c\u0430\u043a\u0440\u043e\u0441\u044b: \u0411: {p}\u0433 | \u0416: {f}\u0433 | \u0423: {c}\u0433",
-        "setlimit_updated": "\u041b\u0438\u043c\u0438\u0442 \u043a\u0430\u043b\u043e\u0440\u0438\u0439 \u043e\u0431\u043d\u043e\u0432\u043b\u0451\u043d: {old} \u2192 {new} \u043a\u043a\u0430\u043b",
-        "history_empty": "\u0417\u0430 {date} \u0437\u0430\u043f\u0438\u0441\u0435\u0439 \u043d\u0435\u0442.",
-        "history_header": "\U0001f4cb \u041f\u0440\u0438\u0451\u043c\u044b \u043f\u0438\u0449\u0438 \u0437\u0430 {date}:",
-        "stats_header": "\U0001f4ca \u0412\u0430\u0448\u0430 \u0441\u0442\u0430\u0442\u0438\u0441\u0442\u0438\u043a\u0430 (\u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0435 30 \u0434\u043d\u0435\u0439):\n",
-        "stats_empty": "\u0414\u0430\u043d\u043d\u044b\u0445 \u043f\u043e\u043a\u0430 \u043d\u0435\u0442. \u041d\u0430\u0447\u043d\u0438\u0442\u0435 \u0437\u0430\u043f\u0438\u0441\u044b\u0432\u0430\u0442\u044c \u043f\u0440\u0438\u0451\u043c\u044b \u043f\u0438\u0449\u0438!",
-        "weight_updated": "\u2705 \u0412\u0435\u0441 \u043e\u0431\u043d\u043e\u0432\u043b\u0451\u043d: {weight} \u043a\u0433.\n\n\u041d\u043e\u0432\u0430\u044f \u043d\u043e\u0440\u043c\u0430 \u0432\u043e\u0434\u044b: {water_target} \u043c\u043b/\u0434\u0435\u043d\u044c\n\u0417\u0430\u043f\u0443\u0441\u0442\u0438\u0442\u0435 /profile \u0434\u043b\u044f \u043f\u0435\u0440\u0435\u0441\u0447\u0451\u0442\u0430.",
-        "export_preparing": "\u23f3 \u041f\u043e\u0434\u0433\u043e\u0442\u043e\u0432\u043a\u0430 \u044d\u043a\u0441\u043f\u043e\u0440\u0442\u0430 \u0437\u0430 {days} \u0434\u043d\u0435\u0439...",
-        "export_empty": "\u0414\u0430\u043d\u043d\u044b\u0445 \u0437\u0430 \u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0435 {days} \u0434\u043d\u0435\u0439 \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u043e.",
-        "export_meals_caption": "\u0414\u043d\u0435\u0432\u043d\u0438\u043a \u043f\u0438\u0442\u0430\u043d\u0438\u044f \u2014 {days} \u0434\u043d\u0435\u0439 ({n} \u0437\u0430\u043f\u0438\u0441\u0435\u0439)",
-        "export_water_caption": "\u0414\u043d\u0435\u0432\u043d\u0438\u043a \u0432\u043e\u0434\u044b \u2014 {days} \u0434\u043d\u0435\u0439 ({n} \u0437\u0430\u043f\u0438\u0441\u0435\u0439)",
-        "timezone_set": "\u2705 \u0427\u0430\u0441\u043e\u0432\u043e\u0439 \u043f\u043e\u044f\u0441: <b>{tz}</b> ({offset}).\n\u0412\u0440\u0435\u043c\u044f \u043d\u0430\u043f\u043e\u043c\u0438\u043d\u0430\u043d\u0438\u0439 \u043e\u0442\u043e\u0431\u0440\u0430\u0436\u0430\u0435\u0442\u0441\u044f \u043f\u043e \u0432\u0430\u0448\u0435\u043c\u0443 \u0432\u0440\u0435\u043c\u0435\u043d\u0438.",
-        "timezone_not_set": "\u043d\u0435 \u0437\u0430\u0434\u0430\u043d (\u0438\u0441\u043f\u043e\u043b\u044c\u0437\u0443\u0435\u0442\u0441\u044f UTC)",
-        "btn_share_location": "\U0001f4cd \u041f\u043e\u0434\u0435\u043b\u0438\u0442\u044c\u0441\u044f \u043c\u0435\u0441\u0442\u043e\u043f\u043e\u043b\u043e\u0436\u0435\u043d\u0438\u0435\u043c",
-        "location_set": "\u2705 \u0427\u0430\u0441\u043e\u0432\u043e\u0439 \u043f\u043e\u044f\u0441: <b>{tz}</b> ({offset}).\n\u0418\u0441\u043f\u043e\u043b\u044c\u0437\u0443\u0439\u0442\u0435 /reminders \u0434\u043b\u044f \u043f\u0440\u043e\u0441\u043c\u043e\u0442\u0440\u0430 \u0440\u0430\u0441\u043f\u0438\u0441\u0430\u043d\u0438\u044f.",
-        "location_no_tz": "\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u043e\u043f\u0440\u0435\u0434\u0435\u043b\u0438\u0442\u044c \u0447\u0430\u0441\u043e\u0432\u043e\u0439 \u043f\u043e\u044f\u0441. \u0423\u043a\u0430\u0436\u0438\u0442\u0435 \u0432\u0440\u0443\u0447\u043d\u0443\u044e: /timezone Europe/Moscow",
-        "location_no_profile": "\u0421\u043d\u0430\u0447\u0430\u043b\u0430 \u0443\u0441\u0442\u0430\u043d\u043e\u0432\u0438\u0442\u0435 \u043f\u0440\u043e\u0444\u0438\u043b\u044c /profile, \u0437\u0430\u0442\u0435\u043c \u043e\u0442\u043f\u0440\u0430\u0432\u044c\u0442\u0435 \u043c\u0435\u0441\u0442\u043e\u043f\u043e\u043b\u043e\u0436\u0435\u043d\u0438\u0435.",
-        "meal_parse_error": "\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0440\u0430\u0437\u043e\u0431\u0440\u0430\u0442\u044c \u0434\u0430\u043d\u043d\u044b\u0435. \u041f\u0435\u0440\u0435\u0444\u0440\u0430\u0437\u0438\u0440\u0443\u0439\u0442\u0435 \u043e\u043f\u0438\u0441\u0430\u043d\u0438\u0435.",
-        "meal_error": "\u0427\u0442\u043e-\u0442\u043e \u043f\u043e\u0448\u043b\u043e \u043d\u0435 \u0442\u0430\u043a. \u041f\u043e\u043f\u0440\u043e\u0431\u0443\u0439\u0442\u0435 \u0435\u0449\u0451 \u0440\u0430\u0437.",
-        "photo_parse_error": "\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0440\u0430\u0441\u043f\u043e\u0437\u043d\u0430\u0442\u044c \u0435\u0434\u0443 \u043d\u0430 \u0444\u043e\u0442\u043e. \u0414\u043e\u0431\u0430\u0432\u044c\u0442\u0435 \u043e\u043f\u0438\u0441\u0430\u043d\u0438\u0435 \u0432 \u043f\u043e\u0434\u043f\u0438\u0441\u0438.",
-        "photo_error": "\u041e\u0448\u0438\u0431\u043a\u0430 \u043f\u0440\u0438 \u0430\u043d\u0430\u043b\u0438\u0437\u0435 \u0444\u043e\u0442\u043e. \u041f\u043e\u043f\u0440\u043e\u0431\u0443\u0439\u0442\u0435 \u0435\u0449\u0451 \u0440\u0430\u0437.",
-        "not_food": "\u042f \u043e\u0442\u0441\u043b\u0435\u0436\u0438\u0432\u0430\u044e \u0435\u0434\u0443 \u0438 \u043a\u0430\u043b\u043e\u0440\u0438\u0438. \u041d\u0430\u043f\u0438\u0448\u0438\u0442\u0435 \u043e\u043f\u0438\u0441\u0430\u043d\u0438\u0435:\n  \u043a\u0443\u0440\u0438\u043d\u044b\u0439 \u0441\u0430\u043b\u0430\u0442 \u0441 \u0440\u0438\u0441\u043e\u043c\n  2 \u044f\u0439\u0446\u0430, \u0442\u043e\u0441\u0442\n\n/help \u2014 \u0432\u0441\u0435 \u043a\u043e\u043c\u0430\u043d\u0434\u044b.",
-        "clarify_fallback": "\U0001f37d \u0414\u043e\u0431\u0430\u0432\u044c\u0442\u0435 \u043f\u043e\u0434\u0440\u043e\u0431\u043d\u043e\u0441\u0442\u0435\u0439?\n\u0421\u043f\u043e\u0441\u043e\u0431 \u043f\u0440\u0438\u0433\u043e\u0442\u043e\u0432\u043b\u0435\u043d\u0438\u044f, \u0432\u0435\u0441 \u0438\u043b\u0438 \u0438\u043d\u0433\u0440\u0435\u0434\u0438\u0435\u043d\u0442\u044b \u043f\u043e\u043c\u043e\u0433\u0443\u0442:\n  \u043d\u0430\u043f\u0440.: *2 \u0432\u0430\u0440\u0451\u043d\u044b\u0445 \u044f\u0439\u0446\u0430* \u00b7 *150\u0433 \u0433\u0440\u0443\u0434\u043a\u0438 \u0433\u0440\u0438\u043b\u044c* \u00b7 *200\u0433 \u0436\u0430\u0440\u0435\u043d\u043e\u0433\u043e \u0440\u0438\u0441\u0430*",
-        "language_set_en": "\u2705 \u042f\u0437\u044b\u043a \u0438\u0437\u043c\u0435\u043d\u0451\u043d \u043d\u0430 <b>English</b>.",
-        "language_set_ru": "\u2705 \u042f\u0437\u044b\u043a \u0438\u0437\u043c\u0435\u043d\u0451\u043d \u043d\u0430 <b>\u0420\u0443\u0441\u0441\u043a\u0438\u0439</b>.",
-        "language_set_hy": "\u2705 \u042f\u0437\u044b\u043a \u0438\u0437\u043c\u0435\u043d\u0451\u043d \u043d\u0430 <b>\u0410\u0440\u043c\u044f\u043d\u0441\u043a\u0438\u0439</b>.",
-        "language_choose": "\u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u044f\u0437\u044b\u043a:",
-        "btn_lang_en": "\U0001f1ec\U0001f1e7 English",
-        "btn_lang_ru": "\U0001f1f7\U0001f1fa \u0420\u0443\u0441\u0441\u043a\u0438\u0439",
-        "btn_lang_hy": "\U0001f1e6\U0001f1f2 \u540d\u56fd",
-        "mealplan_generating": "\u2699\ufe0f \u0413\u0435\u043d\u0435\u0440\u0430\u0446\u0438\u044f 7-\u0434\u043d\u0435\u0432\u043d\u043e\u0433\u043e \u043f\u043b\u0430\u043d\u0430 \u043f\u0438\u0442\u0430\u043d\u0438\u044f...\n\u042d\u0442\u043e \u0437\u0430\u0439\u043c\u0451\u0442 ~10 \u0441\u0435\u043a\u0443\u043d\u0434. \u041f\u043e\u0434\u043e\u0436\u0434\u0438\u0442\u0435.",
-        "mealplan_error_json": "\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0441\u043e\u0437\u0434\u0430\u0442\u044c \u043f\u043b\u0430\u043d. \u041f\u043e\u043f\u0440\u043e\u0431\u0443\u0439\u0442\u0435 \u0435\u0449\u0451 \u0440\u0430\u0437.",
-        "mealplan_error": "\u041e\u0448\u0438\u0431\u043a\u0430 \u043f\u0440\u0438 \u0433\u0435\u043d\u0435\u0440\u0430\u0446\u0438\u0438. \u041f\u043e\u043f\u0440\u043e\u0431\u0443\u0439\u0442\u0435 \u0435\u0449\u0451 \u0440\u0430\u0437.",
-        "delmeal_not_found": "\u0417\u0430\u043f\u0438\u0441\u044c #{id} \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u0430.",
-        "delmeal_done": "\u2705 \u0423\u0434\u0430\u043b\u0435\u043d\u043e #{id}: {name} (~{cal} \u043a\u043a\u0430\u043b)",
-        "delmeal_cb_not_found": "\u0417\u0430\u043f\u0438\u0441\u044c #{id} \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u0430 (\u0443\u0436\u0435 \u0443\u0434\u0430\u043b\u0435\u043d\u0430?).",
-        "delmeal_cb_deleted_toast": "\u0423\u0434\u0430\u043b\u0435\u043d\u043e: {name}",
-        "delmeal_cb_deleted_edit": "\u2705 \u0423\u0434\u0430\u043b\u0435\u043d\u043e: {name}",
-        "btn_invalid": "\u041d\u0435\u0432\u0435\u0440\u043d\u044b\u0439 \u0437\u0430\u043f\u0440\u043e\u0441.",
-        "btn_not_yours": "\u042d\u0442\u0430 \u043a\u043d\u043e\u043f\u043a\u0430 \u043d\u0435 \u0434\u043b\u044f \u0432\u0430\u0441.",
-        "reminder_msg": "\U0001f4a7 \u041d\u0430\u043f\u043e\u043c\u0438\u043d\u0430\u043d\u0438\u0435 \u043e \u0432\u043e\u0434\u0435!\n\u041f\u043e\u0440\u0430 \u0432\u044b\u043f\u0438\u0442\u044c ~{amount}\u043c\u043b \u0432\u043e\u0434\u044b.\n/water {amount} \u2014 \u0437\u0430\u043f\u0438\u0441\u0430\u0442\u044c.",
-        # Premium / subscription
-        "free_limit_reached": (
-            "\u0412\u044b \u0438\u0441\u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u043b\u0438 \u0432\u0441\u0435 {limit} \u0431\u0435\u0441\u043f\u043b\u0430\u0442\u043d\u044b\u0445 \u0437\u0430\u043f\u0438\u0441\u0438 \u0435\u0434\u044b \u0441\u0435\u0433\u043e\u0434\u043d\u044f. \u2b50\n\n"
-            "\u041f\u0435\u0440\u0435\u0439\u0434\u0438\u0442\u0435 \u043d\u0430 Premium \u0434\u043b\u044f \u043d\u0435\u043e\u0433\u0440\u0430\u043d\u0438\u0447\u0435\u043d\u043d\u044b\u0445 \u0437\u0430\u043f\u0438\u0441\u0435\u0439:\n"
-            "/upgrade"
-        ),
-        "premium_photo_gate": (
-            "\U0001f4f7 \u0410\u043d\u0430\u043b\u0438\u0437 \u0444\u043e\u0442\u043e \u2014 \u0444\u0443\u043d\u043a\u0446\u0438\u044f Premium. \u2b50\n\n"
-            "Premium: \u0431\u0435\u0437\u043b\u0438\u043c\u0438\u0442 \u00b7 \u0444\u043e\u0442\u043e \u00b7 \u043f\u043b\u0430\u043d\u044b \u043f\u0438\u0442\u0430\u043d\u0438\u044f \u00b7 \u044d\u043a\u0441\u043f\u043e\u0440\u0442\n"
-            "/upgrade"
-        ),
-        "premium_mealplan_gate": (
-            "\U0001f957 \u0413\u0435\u043d\u0435\u0440\u0430\u0446\u0438\u044f \u043f\u043b\u0430\u043d\u0430 \u043f\u0438\u0442\u0430\u043d\u0438\u044f \u2014 \u0444\u0443\u043d\u043a\u0446\u0438\u044f Premium. \u2b50\n\n"
-            "Premium: \u0431\u0435\u0437\u043b\u0438\u043c\u0438\u0442 \u00b7 \u0444\u043e\u0442\u043e \u00b7 \u043f\u043b\u0430\u043d\u044b \u043f\u0438\u0442\u0430\u043d\u0438\u044f \u00b7 \u044d\u043a\u0441\u043f\u043e\u0440\u0442\n"
-            "/upgrade"
-        ),
-        "premium_export_gate": "\U0001f4ca \u042d\u043a\u0441\u043f\u043e\u0440\u0442 \u2014 \u0444\u0443\u043d\u043a\u0446\u0438\u044f Premium. \u2b50\n/upgrade",
-        "premium_active": (
-            "\u2b50 <b>Premium \u0430\u043a\u0442\u0438\u0432\u0435\u043d</b>\n"
-            "\u0418\u0441\u0442\u0435\u043a\u0430\u0435\u0442: {date}\n\n"
-            "\u0414\u043e\u0441\u0442\u0443\u043f\u043d\u043e: \u0431\u0435\u0437\u043b\u0438\u043c\u0438\u0442 \u00b7 \u0444\u043e\u0442\u043e \u00b7 \u043f\u043b\u0430\u043d\u044b \u00b7 \u044d\u043a\u0441\u043f\u043e\u0440\u0442"
-        ),
-        "premium_lifetime": "\U0001f451 <b>\u041f\u043e\u0436\u0438\u0437\u043d\u0435\u043d\u043d\u044b\u0439 Premium</b> \u2014 \u0432\u0441\u0435 \u0444\u0443\u043d\u043a\u0446\u0438\u0438 \u043d\u0430\u0432\u0441\u0435\u0433\u0434\u0430.",
-        "premium_free": (
-            "\u0412\u044b \u043d\u0430 <b>\u0431\u0435\u0441\u043f\u043b\u0430\u0442\u043d\u043e\u043c \u043f\u043b\u0430\u043d\u0435</b>.\n\n"
-            "\u0421\u0435\u0433\u043e\u0434\u043d\u044f: {count}/{limit} \u0437\u0430\u043f\u0438\u0441\u0435\u0439 \u0435\u0434\u044b \u0438\u0441\u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u043d\u043e\n\n"
-            "\u0411\u0435\u0441\u043f\u043b\u0430\u0442\u043d\u043e: {limit} \u0437\u0430\u043f\u0438\u0441\u0435\u0439/\u0434\u0435\u043d\u044c \u00b7 \u0432\u0441\u0435 \u043a\u043e\u043c\u0430\u043d\u0434\u044b\n"
-            "Premium: \u0431\u0435\u0437\u043b\u0438\u043c\u0438\u0442 \u00b7 \u0444\u043e\u0442\u043e \u00b7 \u043f\u043b\u0430\u043d\u044b \u00b7 \u044d\u043a\u0441\u043f\u043e\u0440\u0442\n\n"
-            "/upgrade \u2014 {price} \u2b50 / 30 \u0434\u043d\u0435\u0439"
-        ),
-        "premium_activated": (
-            "\u2705 <b>Premium \u0430\u043a\u0442\u0438\u0432\u0438\u0440\u043e\u0432\u0430\u043d!</b>\n\n"
-            "\u0422\u0435\u043f\u0435\u0440\u044c \u0443 \u0432\u0430\u0441 \u0431\u0435\u0437\u043b\u0438\u043c\u0438\u0442\u043d\u044b\u0435 \u0437\u0430\u043f\u0438\u0441\u0438, \u0430\u043d\u0430\u043b\u0438\u0437 \u0444\u043e\u0442\u043e, "
-            "7-\u0434\u043d\u0435\u0432\u043d\u044b\u0435 \u043f\u043b\u0430\u043d\u044b \u0438 \u044d\u043a\u0441\u043f\u043e\u0440\u0442 CSV.\n"
-            "\u0414\u0435\u0439\u0441\u0442\u0432\u0443\u0435\u0442 30 \u0434\u043d\u0435\u0439. \u041f\u043e\u0432\u0442\u043e\u0440\u0438\u0442\u0435 /upgrade \u0434\u043b\u044f \u043f\u0440\u043e\u0434\u043b\u0435\u043d\u0438\u044f. \u0421\u043f\u0430\u0441\u0438\u0431\u043e! \u2b50"
-        ),
-        "upgrade_title": "\u2b50 Calorie Bot Premium",
-        "upgrade_description": "\u0411\u0435\u0437\u043b\u0438\u043c\u0438\u0442 \u00b7 \u0424\u043e\u0442\u043e-\u0430\u043d\u0430\u043b\u0438\u0437 \u00b7 7-\u0434\u043d\u0435\u0432\u043d\u044b\u0435 \u043f\u043b\u0430\u043d\u044b \u00b7 \u042d\u043a\u0441\u043f\u043e\u0440\u0442 \u0434\u0430\u043d\u043d\u044b\u0445",
-        "grant_success": "\u2705 Premium \u0432\u044b\u0434\u0430\u043d \u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u0435\u043b\u044e {user_id} \u043d\u0430 {days} \u0434\u043d\u0435\u0439.",
-        "grant_lifetime": "\u2705 \u041f\u043e\u0436\u0438\u0437\u043d\u0435\u043d\u043d\u044b\u0439 Premium \u0432\u044b\u0434\u0430\u043d \u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u0435\u043b\u044e {user_id}.",
-        "revoke_success": "\u2705 Premium \u043e\u0442\u043e\u0437\u0432\u0430\u043d \u0443 \u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u0435\u043b\u044f {user_id}.",
-        "owner_only": "\u26d4 \u042d\u0442\u0430 \u043a\u043e\u043c\u0430\u043d\u0434\u0430 \u0434\u043e\u0441\u0442\u0443\u043f\u043d\u0430 \u0442\u043e\u043b\u044c\u043a\u043e \u0432\u043b\u0430\u0434\u0435\u043b\u044c\u0446\u0443 \u0431\u043e\u0442\u0430.",
-        "grant_usage": "\u0418\u0441\u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u043d\u0438\u0435: /grant <user_id> [\u0434\u043d\u0435\u0439]\n\u041f\u0440\u0438\u043c\u0435\u0440\u044b:\n  /grant 123456789\n  /grant 123456789 30",
-        "revoke_usage": "\u0418\u0441\u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u043d\u0438\u0435: /revoke <user_id>",
-        "already_premium": "\u2b50 \u0423 \u0432\u0430\u0441 \u0443\u0436\u0435 \u0435\u0441\u0442\u044c \u0430\u043a\u0442\u0438\u0432\u043d\u0430\u044f \u043f\u043e\u0434\u043f\u0438\u0441\u043a\u0430 Premium!\n\n\u0418\u0441\u043f\u043e\u043b\u044c\u0437\u0443\u0439\u0442\u0435 /premium \u0434\u043b\u044f \u043f\u0440\u043e\u0441\u043c\u043e\u0442\u0440\u0430 \u0441\u0442\u0430\u0442\u0443\u0441\u0430.",
-    },
-}
-
-
-def t(lang: str, key: str, **kwargs) -> str:
-    """Look up a translation key, falling back to English if not found."""
-    text = TRANSLATIONS.get(lang, {}).get(key) or TRANSLATIONS["en"].get(key, key)
-    if kwargs:
-        try:
-            return text.format(**kwargs)
-        except (KeyError, ValueError):
-            return text
-    return text
-
 
 MEALPLAN_PROMPT = (
     "You are a professional dietitian. Create a complete 7-day meal plan "
@@ -523,107 +212,6 @@ WATER_SCHEDULE = [
 
 # Allowlist for diet_prefs columns (prevents SQL injection in update_diet_pref)
 DIET_PREF_COLUMNS = frozenset({"goal", "schedule", "excludes", "budget_amount", "budget_currency"})
-
-# --- Food intent & clarification heuristics ---
-
-_NON_FOOD_PHRASES = frozenset({
-    "hello", "hi", "hey", "hiya", "sup", "yo",
-    "thanks", "thank you", "thx", "ty",
-    "ok", "okay", "k", "cool", "got it", "sure", "noted",
-    "bye", "goodbye", "cya", "lol", "lmao", "haha", "hehe",
-    "yes", "no", "nope", "yep", "yeah", "nah",
-    "good", "great", "nice", "awesome", "perfect",
-    "what", "who", "where", "when", "why", "how",
-    "hmm", "hm", "ugh", "oh", "ah", "aha", "test", "testing", "cancel",
-})
-
-_FOOD_SIGNAL_WORDS = frozenset({
-    "eat", "ate", "had", "have", "drinking", "drank", "drink",
-    "breakfast", "lunch", "dinner", "snack", "meal",
-    "coffee", "tea", "juice", "water", "milk", "beer", "wine",
-    "egg", "eggs", "bread", "rice", "pasta", "chicken", "beef",
-    "fish", "salmon", "tuna", "cod", "salad", "soup", "pizza", "burger",
-    "sandwich", "wrap", "bowl", "plate", "glass", "cup", "slice",
-    "protein", "shake", "bar", "fruit", "apple", "banana", "orange",
-    "yogurt", "cheese", "butter", "oil", "sauce", "dressing",
-    "kcal", "cal", "calories", "grams", "portion", "serving",
-    "steak", "meat", "pork", "turkey", "shrimp", "tofu",
-    "oatmeal", "oats", "cereal", "granola", "pancake", "waffle",
-    "cookie", "cake", "chocolate", "candy", "chips", "fries",
-    "avocado", "broccoli", "spinach", "carrot", "potato", "tomato",
-    "noodles", "spaghetti", "sushi", "curry", "stew", "taco", "burrito",
-})
-
-_COOKING_METHODS = frozenset({
-    "boiled", "scrambled", "fried", "grilled", "baked", "raw", "steamed",
-    "poached", "roasted", "sauteed", "sautéed", "broiled", "smoked",
-    "hard-boiled", "soft-boiled", "sunny", "over-easy", "cooked",
-    "bbq", "barbecued", "microwaved", "toasted",
-})
-
-_NUMBER_UNIT_RE = re.compile(
-    r'\b\d+\s*(?:g|ml|oz|lb|kg|kcal|cal|mg|cup|tbsp|tsp|slice|piece|pieces|serving|servings)\b',
-    re.IGNORECASE,
-)
-
-_CLARIFICATION_QUESTIONS = {
-    frozenset({"egg", "eggs"}): (
-        "How were the egg(s) cooked?\n"
-        "  e.g. *2 scrambled eggs* · *1 boiled egg* · *fried egg in butter*"
-    ),
-    frozenset({"chicken"}): (
-        "How was the chicken cooked, and roughly how much?\n"
-        "  e.g. *150g grilled chicken breast* · *fried chicken thigh*"
-    ),
-    frozenset({"beef", "steak", "meat"}): (
-        "How was it cooked, and how much?\n"
-        "  e.g. *200g grilled beef* · *beef stir-fry with oil*"
-    ),
-    frozenset({"fish", "salmon", "tuna", "cod"}): (
-        "How was it cooked, and how much?\n"
-        "  e.g. *150g baked salmon* · *canned tuna 80g*"
-    ),
-    frozenset({"pork"}): (
-        "How was the pork cooked, and how much?\n"
-        "  e.g. *150g roasted pork* · *pork chop grilled*"
-    ),
-    frozenset({"rice"}): (
-        "How much rice?\n"
-        "  e.g. *1 cup cooked rice* · *200g white rice*"
-    ),
-    frozenset({"pasta", "noodles", "spaghetti"}): (
-        "How much, and with what sauce?\n"
-        "  e.g. *200g pasta with tomato sauce* · *100g spaghetti carbonara*"
-    ),
-    frozenset({"bread", "toast"}): (
-        "How many slices, and with anything on it?\n"
-        "  e.g. *2 slices toast with butter* · *1 slice whole wheat bread*"
-    ),
-    frozenset({"coffee"}): (
-        "How do you take your coffee?\n"
-        "  e.g. *black coffee* · *flat white* · *coffee with milk and 2 sugars*"
-    ),
-    frozenset({"tea"}): (
-        "Black, or with milk/sugar?\n"
-        "  e.g. *black tea* · *tea with milk and 1 sugar*"
-    ),
-    frozenset({"salad"}): (
-        "What's in the salad, and any dressing?\n"
-        "  e.g. *green salad with olive oil* · *Caesar salad 250g*"
-    ),
-    frozenset({"oatmeal", "oats"}): (
-        "How much, and with anything added?\n"
-        "  e.g. *50g oats with milk* · *oatmeal with banana and honey*"
-    ),
-    frozenset({"milk"}): (
-        "What kind, and how much?\n"
-        "  e.g. *200ml whole milk* · *skimmed milk 250ml*"
-    ),
-    frozenset({"juice"}): (
-        "What kind, and how much?\n"
-        "  e.g. *200ml orange juice* · *apple juice 250ml*"
-    ),
-}
 
 # Quick-start help text (used by /help and /start inline button)
 _HELP_QUICK_START = (
@@ -745,25 +333,12 @@ def db_init() -> None:
         )""",
         """CREATE INDEX IF NOT EXISTS idx_weight_history_user
             ON weight_history(user_id, recorded_at DESC)""",
-        """CREATE TABLE IF NOT EXISTS subscriptions (
-            user_id BIGINT PRIMARY KEY,
-            plan TEXT NOT NULL DEFAULT 'free',
-            expires_at TEXT,
-            granted_by BIGINT,
-            stars_charge_id TEXT
-        )""",
     ]
     for sql in tables:
         cur.execute(sql)
     # Add body_fat_pct column if it doesn't exist yet (safe migration)
     cur.execute(
         "ALTER TABLE profiles ADD COLUMN IF NOT EXISTS body_fat_pct REAL"
-    )
-    cur.execute(
-        "ALTER TABLE profiles ADD COLUMN IF NOT EXISTS user_timezone TEXT"
-    )
-    cur.execute(
-        "ALTER TABLE profiles ADD COLUMN IF NOT EXISTS language TEXT DEFAULT 'en'"
     )
     conn.commit()
     cur.close()
@@ -966,144 +541,6 @@ def get_profile(user_id: int) -> dict | None:
     return dict(row) if row else None
 
 
-def save_user_timezone(user_id: int, tz_name: str) -> bool:
-    """Store IANA timezone for user. Returns False if no profile row exists."""
-    conn = db_connect()
-    cur = conn.cursor()
-    try:
-        cur.execute(
-            "UPDATE profiles SET user_timezone = %s WHERE user_id = %s",
-            (tz_name, user_id),
-        )
-        updated = cur.rowcount > 0
-        conn.commit()
-        return updated
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        cur.close()
-        conn.close()
-
-
-def get_user_timezone(user_id: int):
-    """Return ZoneInfo for the user's stored timezone, or timezone.utc if unset/invalid."""
-    profile = get_profile(user_id)
-    if not profile:
-        return timezone.utc
-    tz_name = profile.get("user_timezone")
-    if not tz_name:
-        return timezone.utc
-    try:
-        return ZoneInfo(tz_name)
-    except (ZoneInfoNotFoundError, KeyError):
-        return timezone.utc
-
-
-def save_user_language(user_id: int, lang: str) -> bool:
-    """UPDATE profiles SET language. Returns False if no profile row."""
-    conn = db_connect()
-    cur = conn.cursor()
-    try:
-        cur.execute("UPDATE profiles SET language = %s WHERE user_id = %s", (lang, user_id))
-        updated = cur.rowcount > 0
-        conn.commit()
-        return updated
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        cur.close()
-        conn.close()
-
-
-def get_user_language(user_id: int) -> str:
-    """Return stored language code, defaulting to DEFAULT_LANGUAGE."""
-    profile = get_profile(user_id)
-    if not profile:
-        return DEFAULT_LANGUAGE
-    return profile.get("language") or DEFAULT_LANGUAGE
-
-
-async def get_lang(update, context) -> str:
-    """Resolve user's language with session caching and Telegram auto-detection."""
-    if "lang" in context.user_data:
-        return context.user_data["lang"]
-    user_id = update.effective_user.id
-    lang = get_user_language(user_id)
-    if lang == DEFAULT_LANGUAGE:
-        tg_code = (update.effective_user.language_code or "en")[:2].lower()
-        if tg_code in SUPPORTED_LANGUAGES and tg_code != DEFAULT_LANGUAGE:
-            lang = tg_code
-            save_user_language(user_id, lang)
-    context.user_data["lang"] = lang
-    return lang
-
-
-def is_premium(user_id: int) -> bool:
-    """Return True if the user has active premium or is the bot owner."""
-    if BOT_OWNER_ID and user_id == BOT_OWNER_ID:
-        return True
-    row = db_query(
-        "SELECT plan, expires_at FROM subscriptions WHERE user_id = %s",
-        (user_id,), fetch="one",
-    )
-    if not row:
-        return False
-    if row["plan"] in ("owner", "premium"):
-        if row["expires_at"] is None:
-            return True
-        return datetime.fromisoformat(row["expires_at"]) > datetime.now(timezone.utc)
-    return False
-
-
-def get_daily_meal_count(user_id: int) -> int:
-    """Count meals logged today by this user."""
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    row = db_query(
-        "SELECT COUNT(*) AS cnt FROM meals WHERE user_id = %s AND created_at LIKE %s",
-        (user_id, f"{today}%"), fetch="one",
-    )
-    return int(row["cnt"]) if row else 0
-
-
-def activate_premium(user_id: int, days: int | None,
-                     granted_by: int | None = None,
-                     charge_id: str | None = None) -> None:
-    """Grant premium to a user. days=None means lifetime."""
-    if days is None:
-        expires_at = None
-    else:
-        expires_at = (datetime.now(timezone.utc) + timedelta(days=days)).isoformat()
-    plan = "owner" if (granted_by is None and days is None) else "premium"
-    db_query(
-        "INSERT INTO subscriptions (user_id, plan, expires_at, granted_by, stars_charge_id)"
-        " VALUES (%s,%s,%s,%s,%s)"
-        " ON CONFLICT(user_id) DO UPDATE SET plan=EXCLUDED.plan,"
-        " expires_at=EXCLUDED.expires_at, granted_by=EXCLUDED.granted_by,"
-        " stars_charge_id=EXCLUDED.stars_charge_id",
-        (user_id, plan, expires_at, granted_by, charge_id),
-    )
-
-
-def revoke_premium(user_id: int) -> None:
-    """Remove a user's premium subscription."""
-    db_query("DELETE FROM subscriptions WHERE user_id = %s", (user_id,))
-
-
-def _format_time_in_tz(hour: int, minute: int, tz) -> str:
-    """Convert a UTC (hour, minute) to a display string in the user's timezone.
-    Example: '16:30 your time (14:30 UTC)'  or  '14:30 UTC' when tz is UTC.
-    """
-    if tz is timezone.utc or tz == timezone.utc:
-        return f"{hour:02d}:{minute:02d} UTC"
-    now_utc = datetime.now(timezone.utc).replace(
-        hour=hour, minute=minute, second=0, microsecond=0
-    )
-    local_dt = now_utc.astimezone(tz)
-    return f"{local_dt.strftime('%H:%M')} your time ({hour:02d}:{minute:02d} UTC)"
-
-
 def get_water_target(user_id: int) -> int:
     """Return daily water target in ml. Weight-based if profile available (~35ml/kg)."""
     profile = get_profile(user_id)
@@ -1298,7 +735,7 @@ def _parse_ai_json(raw: str) -> dict:
 
 
 def _validate_meal_plan_macros(plan: dict, targets: dict) -> list[str]:
-    """Check each day's totals against calorie (±5%) and protein (±10%) targets.
+    """Check each day's totals against calorie (\u00b15%) and protein (\u00b110%) targets.
     Returns a list of warning strings; empty = all days pass."""
     cal_target = targets["daily_limit"]
     prot_target = targets["daily_protein_g"]
@@ -1320,7 +757,7 @@ def _validate_meal_plan_macros(plan: dict, targets: dict) -> list[str]:
 
 
 def _progress_bar(current: int, target: int, width: int = 10) -> str:
-    """ASCII progress bar. e.g. [████████░░] 80%"""
+    """ASCII progress bar. e.g. [\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2591\u2591] 80%"""
     if target <= 0:
         return ""
     pct = min(current / target, 1.0)
@@ -1337,56 +774,53 @@ def _confidence_icon(confidence: str) -> str:
 
 
 def _truncate(text: str, limit: int = 40) -> str:
-    """Truncate text to limit chars, appending '…' if cut."""
+    """Truncate text to limit chars, appending '\u2026' if cut."""
     if len(text) <= limit:
         return text
     return text[:limit].rstrip() + "\u2026"
 
 
-def _looks_like_food(text: str) -> bool:
-    """Return True if the text is likely a food description, not a greeting/chatter."""
-    stripped = text.strip().lower()
-    if stripped in _NON_FOOD_PHRASES:
-        return False
-    words = stripped.split()
-    if len(words) <= 3 and all(w in _NON_FOOD_PHRASES for w in words):
-        return False
-    if _NUMBER_UNIT_RE.search(text):
-        return True
-    if set(words) & _FOOD_SIGNAL_WORDS:
-        return True
-    if len(words) >= 6:
-        return True
-    return False
-
-
-def _needs_clarification(text: str) -> bool:
-    """True if the food description is too vague to estimate accurately (no quantity/cooking method)."""
-    words = text.strip().lower().split()
-    if len(words) > 3:
-        return False
-    if _NUMBER_UNIT_RE.search(text):
-        return False
-    if set(words) & _COOKING_METHODS:
-        return False
-    return bool(set(words) & _FOOD_SIGNAL_WORDS)
-
-
-def _get_clarification_question(text: str) -> str:
-    """Return a specific clarification question based on the food mentioned."""
-    words = frozenset(text.strip().lower().split())
-    for food_set, question in _CLARIFICATION_QUESTIONS.items():
-        if words & food_set:
-            return f"\U0001f373 Got it! {question}"
-    return (
-        "\U0001f37d Can you add a bit more detail?\n"
-        "Cooking method, quantity, or ingredients help a lot:\n"
-        "  e.g. *2 boiled eggs* \u00b7 *150g grilled chicken* \u00b7 *200g fried rice*"
-    )
-
-
 _MEAL_CACHE: dict[str, dict] = {}
 _MEAL_CACHE_MAX = 200
+
+_PREFLIGHT_CACHE: dict[str, dict] = {}
+_PREFLIGHT_CACHE_MAX = 200
+
+
+def preflight_meal_input(meal_text: str) -> dict:
+    """AI input validator. Returns one of:
+      {"intent": "non_food"}
+      {"intent": "needs_clarification", "suggested": <str|None>, "question": <str>}
+      {"intent": "ok"}
+    Cached by normalized text up to 200 entries.
+    """
+    key = meal_text.strip().lower()
+    if key in _PREFLIGHT_CACHE:
+        return _PREFLIGHT_CACHE[key]
+
+    response = _groq_with_retry(
+        groq_client.chat.completions.create,
+        model="llama-3.1-8b-instant",
+        temperature=0.2,
+        max_tokens=200,
+        messages=[
+            {"role": "system", "content": PREFLIGHT_PROMPT},
+            {"role": "user", "content": meal_text},
+        ],
+    )
+    try:
+        result = _parse_ai_json(response.choices[0].message.content)
+    except (json.JSONDecodeError, AttributeError):
+        # If preflight parse fails, fall through to estimation rather than block the user.
+        result = {"intent": "ok"}
+
+    if result.get("intent") not in ("non_food", "needs_clarification", "ok"):
+        result = {"intent": "ok"}
+
+    if len(_PREFLIGHT_CACHE) >= _PREFLIGHT_CACHE_MAX:
+        _PREFLIGHT_CACHE.pop(next(iter(_PREFLIGHT_CACHE)))
+    _PREFLIGHT_CACHE[key] = result
+    return result
 
 
 def estimate_calories(meal_text: str) -> dict:
@@ -1415,7 +849,7 @@ def estimate_calories(meal_text: str) -> dict:
     return result
 
 
-MAX_IMAGE_BYTES = 800_000   # 800 KB — safe margin under Groq token limits
+MAX_IMAGE_BYTES = 800_000   # 800 KB \u2014 safe margin under Groq token limits
 MAX_IMAGE_DIM = 1024        # max pixels on longest side
 
 
@@ -1616,7 +1050,7 @@ async def generate_meal_plan(targets: dict, profile: dict, prefs: dict) -> dict:
     all_ingredients = []
 
     def _call_group_sync(group: list[str]) -> dict:
-        """Blocking Groq call for one day group — run in a thread."""
+        """Blocking Groq call for one day group \u2014 run in a thread."""
         day_names = ", ".join(group)
         user_msg = f"{base_context}\n\nGenerate meals for: {day_names}"
         response = _groq_with_retry(
@@ -1688,21 +1122,21 @@ def _html(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
-def _build_water_status_text(user_id: int, lang: str = "en") -> str:
+def _build_water_status_text(user_id: int) -> str:
     """Return a one-line water progress string for the current user."""
     total = get_today_water(user_id)
     target = get_water_target(user_id)
     remaining = target - total
     if remaining > 0:
-        return t(lang, "water_status_remaining", total=total, target=target, remaining=remaining)
-    return t(lang, "water_status_done", total=total, target=target)
+        return f"\U0001f4a7 Today: {total} / {target}ml ({remaining}ml remaining)"
+    return f"\u2705 Today: {total} / {target}ml \u2014 target reached!"
 
 
-def _water_quick_keyboard(user_id: int, chat_id: int, lang: str = "en") -> InlineKeyboardMarkup:
+def _water_quick_keyboard(user_id: int, chat_id: int) -> InlineKeyboardMarkup:
     """2x2 grid of quick water-log buttons (250 / 500 / 750 / 1000 ml)."""
     def _btn(ml: int) -> InlineKeyboardButton:
         return InlineKeyboardButton(
-            t(lang, "btn_water", ml=ml),
+            f"\U0001f4a7 {ml}ml",
             callback_data=f"water_quick:{ml}:{user_id}:{chat_id}",
         )
     return InlineKeyboardMarkup([
@@ -1711,10 +1145,10 @@ def _water_quick_keyboard(user_id: int, chat_id: int, lang: str = "en") -> Inlin
     ])
 
 
-def format_reply(data: dict, today: dict, targets: dict, lang: str = "en") -> tuple[str, str]:
+def format_reply(data: dict, today: dict, targets: dict) -> tuple[str, str]:
     """Format calorie estimate with daily progress and macros.
-    Returns (text, parse_mode) — parse_mode is 'HTML'."""
-    lines = [t(lang, "estimate_header")]
+    Returns (text, parse_mode) \u2014 parse_mode is 'HTML'."""
+    lines = ["\U0001f37d <b>Calorie Estimate</b>"]
     for item in data.get("items", []):
         portion = item.get("portion", "")
         portion_str = f" ({_html(portion)})" if portion else ""
@@ -1736,7 +1170,10 @@ def format_reply(data: dict, today: dict, targets: dict, lang: str = "en") -> tu
     tf = data.get("total_fat_g", 0)
     tc = data.get("total_carbs_g", 0)
     tfib = data.get("total_fiber_g", 0)
-    lines.append(t(lang, "meal_total", total=data.get("total", 0), p=tp, f=tf, c=tc, fib=tfib))
+    lines.append(
+        f"<b>Meal total:</b> ~{data.get('total', 0)} kcal"
+        f" | P: {tp}g | F: {tf}g | C: {tc}g | Fiber: {tfib}g"
+    )
 
     note = data.get("note")
     if note:
@@ -1748,9 +1185,15 @@ def format_reply(data: dict, today: dict, targets: dict, lang: str = "en") -> tu
     remaining = cal_limit - cal_today
     bar = _progress_bar(cal_today, cal_limit)
     if remaining >= 0:
-        lines.append(t(lang, "today_progress", cal=cal_today, limit=cal_limit, bar=bar, remaining=remaining))
+        lines.append(
+            f"\n\U0001f4ca <b>Today:</b> {cal_today} / {cal_limit} kcal\n"
+            f"{bar} ({remaining} remaining)"
+        )
     else:
-        lines.append(t(lang, "over_limit", cal=cal_today, limit=cal_limit, bar=bar, over=abs(remaining)))
+        lines.append(
+            f"\n\u26a0\ufe0f <b>Over limit!</b> {cal_today} / {cal_limit} kcal\n"
+            f"{bar} (+{abs(remaining)} over)"
+        )
 
     tp_target = targets["daily_protein_g"]
     tf_target = targets["daily_fat_g"]
@@ -1765,7 +1208,9 @@ def format_reply(data: dict, today: dict, targets: dict, lang: str = "en") -> tu
             f"C: {today['carbs_g']}/{tc_target}g {c_bar}"
         )
 
-    lines.append(t(lang, "confidence_legend"))
+    lines.append(
+        "\n<i>\u2705 high confidence \u00b7 \U0001f7e1 estimated \u00b7 \u26a0\ufe0f uncertain</i>"
+    )
     return "\n".join(lines), "HTML"
 
 
@@ -1774,16 +1219,20 @@ def format_reply(data: dict, today: dict, targets: dict, lang: str = "en") -> tu
 # ---------------------------------------------------------------------------
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    lang = await get_lang(update, context)
     name = update.effective_user.first_name or "there"
     keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton(t(lang, "btn_quickstart"), callback_data="help_quickstart"),
+        InlineKeyboardButton("\U0001f4d6 Quick Start Guide", callback_data="help_quickstart"),
     ]])
-    await update.message.reply_text(
-        t(lang, "start_msg", name=_html(name)),
-        parse_mode="HTML",
-        reply_markup=keyboard,
+    msg = (
+        f"\U0001f44b Hi {_html(name)}! I track your calories and macros.\n\n"
+        "1\ufe0f\u20e3 <b>Set your profile</b> for personalized targets:\n"
+        "   <code>/profile 180 75 28 male moderate</code>\n\n"
+        "2\ufe0f\u20e3 <b>Log a meal</b> \u2014 just type what you ate:\n"
+        "   <code>2 eggs, toast with butter</code>\n\n"
+        "3\ufe0f\u20e3 <b>Check your day:</b> /today\n\n"
+        "Or send a \U0001f4f7 photo of your meal anytime!"
     )
+    await update.message.reply_text(msg, parse_mode="HTML", reply_markup=keyboard)
 
 
 async def help_quickstart_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1980,11 +1429,10 @@ async def macros_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def today_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    lang = await get_lang(update, context)
     user_id = update.effective_user.id
     meals = get_today_meals(user_id)
     if not meals:
-        await update.message.reply_text(t(lang, "today_empty"))
+        await update.message.reply_text("No meals logged today. Just type what you ate!")
         return
 
     targets = get_targets(user_id)
@@ -1994,7 +1442,7 @@ async def today_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     total_c = sum(m["carbs_g"] for m in meals)
     remaining = targets["daily_limit"] - total_cal
 
-    lines = [t(lang, "today_header")]
+    lines = ["\U0001f4cb <b>Today's meals:</b>"]
     keyboard_rows = []
     for m in meals:
         ts = m["created_at"][11:16]
@@ -2005,16 +1453,23 @@ async def today_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
         keyboard_rows.append([
             InlineKeyboardButton(
-                t(lang, "btn_delete", name=_truncate(m["meal_text"], 25)),
+                f"\U0001f5d1 Delete: {_truncate(m['meal_text'], 25)}",
                 callback_data=f"delmeal_inline:{m['id']}:{user_id}",
             )
         ])
 
-    lines.append(t(lang, "today_total", cal=total_cal, p=total_p, f=total_f, c=total_c))
+    lines.append(
+        f"\n<b>Total:</b> {total_cal} kcal | P: {total_p}g | F: {total_f}g | C: {total_c}g"
+    )
     if remaining >= 0:
-        lines.append(t(lang, "today_remaining", cal=total_cal, limit=targets["daily_limit"], remaining=remaining))
+        lines.append(
+            f"\U0001f4ca {total_cal} / {targets['daily_limit']} kcal ({remaining} remaining)"
+        )
     else:
-        lines.append(t(lang, "today_over", cal=total_cal, limit=targets["daily_limit"], over=abs(remaining)))
+        lines.append(
+            f"\u26a0\ufe0f <b>Over limit!</b> {total_cal} / {targets['daily_limit']} kcal"
+            f" (+{abs(remaining)} over)"
+        )
 
     if targets["daily_protein_g"] > 0:
         lines.append(
@@ -2102,41 +1557,46 @@ async def limit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def water_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    lang = await get_lang(update, context)
     user = update.effective_user
     chat_id = update.effective_chat.id
     if not context.args:
-        status = _build_water_status_text(user.id, lang)
+        status = _build_water_status_text(user.id)
         await update.message.reply_text(
-            t(lang, "water_quick_header", status=status),
-            reply_markup=_water_quick_keyboard(user.id, chat_id, lang),
+            f"\U0001f4a7 Quick water log\n{status}",
+            reply_markup=_water_quick_keyboard(user.id, chat_id),
         )
         return
     try:
         amount = int(context.args[0])
     except ValueError:
-        await update.message.reply_text(t(lang, "water_invalid_number"))
+        await update.message.reply_text("Please provide a number. Example: /water 500")
         return
     if amount <= 0 or amount > 5000:
-        await update.message.reply_text(t(lang, "water_invalid_range"))
+        await update.message.reply_text("Amount must be between 1 and 5000 ml.")
         return
 
     save_water(user.id, user.username or user.first_name, chat_id, amount)
-    status = _build_water_status_text(user.id, lang)
+    status = _build_water_status_text(user.id)
     await update.message.reply_text(
-        t(lang, "water_logged", amount=amount, status=status),
-        reply_markup=_water_quick_keyboard(user.id, chat_id, lang),
+        f"\U0001f4a7 Logged {amount}ml.\n{status}",
+        reply_markup=_water_quick_keyboard(user.id, chat_id),
     )
 
 
 async def watertoday_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    lang = await get_lang(update, context)
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
-    status = _build_water_status_text(user_id, lang)
+    status = _build_water_status_text(user_id)
     await update.message.reply_text(
         status,
-        reply_markup=_water_quick_keyboard(user_id, chat_id, lang),
+        reply_markup=_water_quick_keyboard(user_id, chat_id),
+    )
+
+
+def _format_schedule_lines() -> str:
+    """Format the WATER_SCHEDULE as bulleted UTC time lines."""
+    return "\n".join(
+        f"  {h:02d}:{m:02d} UTC \u2014 {a}ml" for h, m, a in WATER_SCHEDULE
     )
 
 
@@ -2145,17 +1605,13 @@ async def reminders_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if not context.args:
         is_on = chat_id in get_reminder_chats()
         status = "ON \u2705" if is_on else "OFF"
-        tz = get_user_timezone(update.effective_user.id)
-        schedule = "\n".join(
-            f"  {_format_time_in_tz(h, m, tz)} \u2014 {a}ml" for h, m, a in WATER_SCHEDULE
-        )
         keyboard = InlineKeyboardMarkup([[
             InlineKeyboardButton("Turn On",  callback_data=f"reminders_toggle:on:{chat_id}"),
             InlineKeyboardButton("Turn Off", callback_data=f"reminders_toggle:off:{chat_id}"),
         ]])
         await update.message.reply_text(
             f"\U0001f4a7 Water reminders are currently <b>{status}</b> for this chat.\n\n"
-            f"Schedule:\n{schedule}",
+            f"Schedule:\n{_format_schedule_lines()}",
             parse_mode="HTML",
             reply_markup=keyboard,
         )
@@ -2163,12 +1619,9 @@ async def reminders_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     action = context.args[0].lower()
     if action == "on":
         add_reminder_chat(chat_id)
-        tz = get_user_timezone(update.effective_user.id)
-        schedule = "\n".join(
-            f"  {_format_time_in_tz(h, m, tz)} \u2014 {a}ml" for h, m, a in WATER_SCHEDULE
-        )
         await update.message.reply_text(
-            f"\U0001f4a7 Water reminders enabled for this chat!\n\nSchedule:\n{schedule}"
+            f"\U0001f4a7 Water reminders enabled for this chat!\n\n"
+            f"Schedule:\n{_format_schedule_lines()}"
         )
     elif action == "off":
         remove_reminder_chat(chat_id)
@@ -2178,40 +1631,41 @@ async def reminders_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 
 async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    lang = await get_lang(update, context)
     user_id = update.effective_user.id
     if not context.args:
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton(t(lang, "btn_reset_meals"), callback_data=f"reset_action:meals:{user_id}")],
-            [InlineKeyboardButton(t(lang, "btn_reset_water"), callback_data=f"reset_action:water:{user_id}")],
-            [InlineKeyboardButton(t(lang, "btn_reset_all"),   callback_data=f"reset_action:all:{user_id}")],
+            [InlineKeyboardButton("\U0001f5d1 Today's Meals", callback_data=f"reset_action:meals:{user_id}")],
+            [InlineKeyboardButton("\U0001f5d1 Today's Water", callback_data=f"reset_action:water:{user_id}")],
+            [InlineKeyboardButton("\u26a0\ufe0f Everything",   callback_data=f"reset_action:all:{user_id}")],
         ])
-        await update.message.reply_text(t(lang, "reset_choose"), reply_markup=keyboard)
+        await update.message.reply_text("What would you like to reset?", reply_markup=keyboard)
         return
 
     action = context.args[0].lower()
 
     if action == "meals":
         reset_today_meals(user_id)
-        await update.message.reply_text(t(lang, "reset_meals_done"))
+        await update.message.reply_text("\u2705 Today's meal logs cleared.")
     elif action == "water":
         reset_today_water(user_id)
-        await update.message.reply_text(t(lang, "reset_water_done"))
+        await update.message.reply_text("\u2705 Today's water logs cleared.")
     elif action == "all":
         keyboard = InlineKeyboardMarkup([
             [
                 InlineKeyboardButton(
-                    t(lang, "btn_yes_delete"),
+                    "Yes, delete everything",
                     callback_data=f"confirm_reset_all:{user_id}",
                 ),
                 InlineKeyboardButton(
-                    t(lang, "btn_cancel"),
+                    "Cancel",
                     callback_data=f"cancel_reset_all:{user_id}",
                 ),
             ]
         ])
         await update.message.reply_text(
-            t(lang, "reset_all_confirm"),
+            "Are you sure? This will permanently delete ALL your data:\n"
+            "meals, water, profile, diet preferences, calorie limits, and weight history.\n\n"
+            "This cannot be undone.",
             reply_markup=keyboard,
         )
     else:
@@ -2221,7 +1675,6 @@ async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def goal_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    lang = await get_lang(update, context)
     user_id = update.effective_user.id
     if not context.args:
         prefs = get_diet_prefs(user_id)
@@ -2235,7 +1688,8 @@ async def goal_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         ]])
         goal_desc = GOALS.get(current_goal, current_goal)
         await update.message.reply_text(
-            t(lang, "goal_current", goal=current_goal, desc=goal_desc),
+            f"\U0001f3af Current goal: <b>{current_goal}</b> ({goal_desc})\n"
+            "Select a new goal:",
             parse_mode="HTML",
             reply_markup=keyboard,
         )
@@ -2395,14 +1849,14 @@ def _format_day_block(day_data: dict) -> str:
     lines = [f"\U0001f4c5 <b>{day_data['day']}</b>"]
     for meal in day_data.get("meals", []):
         slot = meal.get("slot", "").capitalize()
-        t = meal.get("time", "")
+        meal_time = meal.get("time", "")
         name = _html(meal.get("name", ""))
         cal = meal.get("calories", 0)
         p = meal.get("protein_g", 0)
         f_val = meal.get("fat_g", 0)
         c = meal.get("carbs_g", 0)
         lines.append(
-            f"\n\U0001f37d <b>{slot}</b> ({t})\n{name}\n~{cal} kcal | P:{p}g | F:{f_val}g | C:{c}g"
+            f"\n\U0001f37d <b>{slot}</b> ({meal_time})\n{name}\n~{cal} kcal | P:{p}g | F:{f_val}g | C:{c}g"
         )
     dt = day_data.get("day_total", {})
     lines.append(
@@ -2414,12 +1868,7 @@ def _format_day_block(day_data: dict) -> str:
 
 async def mealplan_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Generate a 7-day meal plan."""
-    lang = await get_lang(update, context)
     user_id = update.effective_user.id
-
-    if not is_premium(user_id):
-        await update.message.reply_text(t(lang, "premium_mealplan_gate"))
-        return
 
     # Pre-flight checklist
     profile = get_profile(user_id)
@@ -2469,7 +1918,10 @@ async def mealplan_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
         return
 
-    await update.message.reply_text(t(lang, "mealplan_generating"))
+    await update.message.reply_text(
+        "\u2699\ufe0f Generating your 7-day meal plan...\n"
+        "This takes ~10 seconds (3 parallel AI calls + shopping list). Please wait."
+    )
 
     try:
         plan = await generate_meal_plan(targets, profile, prefs)
@@ -2588,7 +2040,7 @@ async def shoplist_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 
 # ---------------------------------------------------------------------------
-# New command handlers
+# More command handlers
 # ---------------------------------------------------------------------------
 
 async def delmeal_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2666,9 +2118,9 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     lines = [f"\U0001f4cb Meals for {date_str}:"]
     for m in meals:
-        t = m["created_at"][11:16]
+        ts = m["created_at"][11:16]
         lines.append(
-            f"- [#{m['id']}] [{t}] {_truncate(m['meal_text'])}: ~{m['calories']} kcal"
+            f"- [#{m['id']}] [{ts}] {_truncate(m['meal_text'])}: ~{m['calories']} kcal"
             f" (P:{m['protein_g']}g F:{m['fat_g']}g C:{m['carbs_g']}g)"
         )
     lines.append(f"\nTotal: {total_cal} kcal | P: {total_p}g | F: {total_f}g | C: {total_c}g")
@@ -2783,21 +2235,19 @@ async def delmeal_inline_callback(update: Update, context: ContextTypes.DEFAULT_
         _, meal_id_str, owner_id_str = query.data.split(":")
         meal_id, owner_id = int(meal_id_str), int(owner_id_str)
     except (ValueError, AttributeError):
-        lang_fb = context.user_data.get("lang", "en")
-        await query.answer(t(lang_fb, "btn_invalid"), show_alert=True)
+        await query.answer("Invalid request.", show_alert=True)
         return
-    lang = context.user_data.get("lang", "en")
     if owner_id != user_id:
-        await query.answer(t(lang, "btn_not_yours"), show_alert=True)
+        await query.answer("This button isn't for you.", show_alert=True)
         return
     meal = get_meal_by_id(meal_id, user_id)
     if not meal:
-        await query.answer(t(lang, "delmeal_cb_not_found", id=meal_id), show_alert=True)
+        await query.answer(f"Meal #{meal_id} not found (already deleted?).", show_alert=True)
         return
     deleted = delete_meal_by_id(meal_id, user_id)
     if deleted:
         short_text = _truncate(meal["meal_text"], 30)
-        await query.answer(t(lang, "delmeal_cb_deleted_toast", name=short_text))
+        await query.answer(f"Deleted: {short_text}")
         try:
             new_keyboard = [
                 row for row in query.message.reply_markup.inline_keyboard
@@ -2808,7 +2258,7 @@ async def delmeal_inline_callback(update: Update, context: ContextTypes.DEFAULT_
             ]
             original = query.message.text or ""
             await query.edit_message_text(
-                text=original + "\n\n" + t(lang, "delmeal_cb_deleted_edit", name=_html(short_text)),
+                text=original + "\n\n" + f"\u2705 Deleted: {_html(short_text)}",
                 reply_markup=InlineKeyboardMarkup(new_keyboard) if new_keyboard else None,
                 parse_mode="HTML",
             )
@@ -2831,32 +2281,21 @@ async def reset_all_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.answer("This button isn't for you.", show_alert=True)
         return
 
-    lang = context.user_data.get("lang", "en")
     if action_part == "confirm_reset_all":
         reset_all_data(user_id)
-        await query.edit_message_text(t(lang, "reset_all_done"))
+        await query.edit_message_text("\u2705 All your data has been permanently deleted.")
     else:
-        await query.edit_message_text(t(lang, "reset_cancelled"))
+        await query.edit_message_text("Reset cancelled. Your data is safe.")
 
 
 async def try_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Estimate calories for a meal without saving it to the log."""
-    lang = await get_lang(update, context)
-
     if not context.args:
-        usage = {
-            "en": (
-                "Usage: /try <meal description>\n"
-                "Example: /try 2 scrambled eggs with toast\n\n"
-                "Estimates calories without adding to your log."
-            ),
-            "ru": (
-                "\u0418\u0441\u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u043d\u0438\u0435: /try <\u043e\u043f\u0438\u0441\u0430\u043d\u0438\u0435 \u0435\u0434\u044b>\n"
-                "\u041f\u0440\u0438\u043c\u0435\u0440: /try 2 \u044f\u0439\u0446\u0430 \u0441 \u0442\u043e\u0441\u0442\u043e\u043c\n\n"
-                "\u041e\u0446\u0435\u043d\u0438\u0432\u0430\u0435\u0442 \u043a\u0430\u043b\u043e\u0440\u0438\u0438 \u0431\u0435\u0437 \u0441\u043e\u0445\u0440\u0430\u043d\u0435\u043d\u0438\u044f \u0432 \u0434\u043d\u0435\u0432\u043d\u0438\u043a."
-            ),
-        }
-        await update.message.reply_text(usage.get(lang, usage["en"]))
+        await update.message.reply_text(
+            "Usage: /try <meal description>\n"
+            "Example: /try 2 scrambled eggs with toast\n\n"
+            "Estimates calories without adding to your log."
+        )
         return
 
     meal_text = " ".join(context.args)
@@ -2864,11 +2303,7 @@ async def try_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     try:
         data = estimate_calories(meal_text)
 
-        header = {
-            "en": "\U0001f50d <b>Calorie Preview</b> <i>(not saved to log)</i>",
-            "ru": "\U0001f50d <b>\u041f\u0440\u0435\u0434\u0432\u0430\u0440\u0438\u0442\u0435\u043b\u044c\u043d\u044b\u0439 \u043f\u0440\u043e\u0441\u043c\u043e\u0442\u0440</b> <i>(\u043d\u0435 \u0441\u043e\u0445\u0440\u0430\u043d\u044f\u0435\u0442\u0441\u044f)</i>",
-        }
-        lines = [header.get(lang, header["en"])]
+        lines = ["\U0001f50d <b>Calorie Preview</b> <i>(not saved to log)</i>"]
 
         for item in data.get("items", []):
             portion = item.get("portion", "")
@@ -2900,17 +2335,10 @@ async def try_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if note:
             lines.append(f"<i>{_html(note)}</i>")
 
-        footer = {
-            "en": (
-                "\n<i>\u26a1 Preview only \u2014 not added to your log.\n"
-                "Send the description as a normal message to log it.</i>"
-            ),
-            "ru": (
-                "\n<i>\u26a1 \u041f\u0440\u0435\u0434\u0432\u0430\u0440\u0438\u0442\u0435\u043b\u044c\u043d\u044b\u0439 \u043f\u0440\u043e\u0441\u043c\u043e\u0442\u0440 \u2014 \u043d\u0435 \u0434\u043e\u0431\u0430\u0432\u043b\u0435\u043d\u043e \u0432 \u0434\u043d\u0435\u0432\u043d\u0438\u043a.\n"
-                "\u041e\u0442\u043f\u0440\u0430\u0432\u044c\u0442\u0435 \u043e\u043f\u0438\u0441\u0430\u043d\u0438\u0435 \u043e\u0431\u044b\u0447\u043d\u044b\u043c \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0435\u043c, \u0447\u0442\u043e\u0431\u044b \u0437\u0430\u043f\u0438\u0441\u0430\u0442\u044c.</i>"
-            ),
-        }
-        lines.append(footer.get(lang, footer["en"]))
+        lines.append(
+            "\n<i>\u26a1 Preview only \u2014 not added to your log.\n"
+            "Send the description as a normal message to log it.</i>"
+        )
 
         await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
@@ -2924,156 +2352,9 @@ async def try_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.message.reply_text("Something went wrong. Please try again.")
 
 
-async def premium_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show the user's current subscription status."""
-    lang = await get_lang(update, context)
-    user_id = update.effective_user.id
-    if BOT_OWNER_ID and user_id == BOT_OWNER_ID:
-        await update.message.reply_text(t(lang, "premium_lifetime"), parse_mode="HTML")
-        return
-    row = db_query(
-        "SELECT plan, expires_at FROM subscriptions WHERE user_id = %s",
-        (user_id,), fetch="one",
-    )
-    if row and row["plan"] in ("owner", "premium"):
-        if row["expires_at"] is None:
-            await update.message.reply_text(t(lang, "premium_lifetime"), parse_mode="HTML")
-        else:
-            exp = datetime.fromisoformat(row["expires_at"])
-            if exp > datetime.now(timezone.utc):
-                await update.message.reply_text(
-                    t(lang, "premium_active", date=exp.strftime("%Y-%m-%d")),
-                    parse_mode="HTML",
-                )
-            else:
-                count = get_daily_meal_count(user_id)
-                await update.message.reply_text(
-                    t(lang, "premium_free", count=count,
-                      limit=FREE_DAILY_MEAL_LIMIT, price=PREMIUM_STARS_PRICE),
-                    parse_mode="HTML",
-                )
-    else:
-        count = get_daily_meal_count(user_id)
-        await update.message.reply_text(
-            t(lang, "premium_free", count=count,
-              limit=FREE_DAILY_MEAL_LIMIT, price=PREMIUM_STARS_PRICE),
-            parse_mode="HTML",
-        )
-
-
-async def upgrade_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Send a Telegram Stars invoice for premium subscription."""
-    lang = await get_lang(update, context)
-    user_id = update.effective_user.id
-    if is_premium(user_id):
-        await update.message.reply_text(t(lang, "already_premium"), parse_mode="HTML")
-        return
-    await context.bot.send_invoice(
-        chat_id=user_id,
-        title=t(lang, "upgrade_title"),
-        description=t(lang, "upgrade_description"),
-        payload="premium_30d",
-        currency="XTR",
-        prices=[LabeledPrice(t(lang, "upgrade_title"), PREMIUM_STARS_PRICE)],
-    )
-
-
-async def grant_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Owner only: grant premium to a user. /grant <user_id> [days]"""
-    lang = await get_lang(update, context)
-    if update.effective_user.id != BOT_OWNER_ID:
-        await update.message.reply_text(t(lang, "owner_only"))
-        return
-    if not context.args:
-        await update.message.reply_text(t(lang, "grant_usage"))
-        return
-    try:
-        target_id = int(context.args[0])
-        days = int(context.args[1]) if len(context.args) > 1 else None
-    except ValueError:
-        await update.message.reply_text(t(lang, "grant_usage"))
-        return
-    activate_premium(target_id, days=days, granted_by=update.effective_user.id)
-    if days is None:
-        await update.message.reply_text(
-            t(lang, "grant_lifetime", user_id=target_id), parse_mode="HTML"
-        )
-    else:
-        await update.message.reply_text(
-            t(lang, "grant_success", user_id=target_id, days=days), parse_mode="HTML"
-        )
-
-
-async def revoke_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Owner only: revoke premium from a user. /revoke <user_id>"""
-    lang = await get_lang(update, context)
-    if update.effective_user.id != BOT_OWNER_ID:
-        await update.message.reply_text(t(lang, "owner_only"))
-        return
-    if not context.args:
-        await update.message.reply_text(t(lang, "revoke_usage"))
-        return
-    try:
-        target_id = int(context.args[0])
-    except ValueError:
-        await update.message.reply_text(t(lang, "revoke_usage"))
-        return
-    revoke_premium(target_id)
-    await update.message.reply_text(
-        t(lang, "revoke_success", user_id=target_id), parse_mode="HTML"
-    )
-
-
-async def pre_checkout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Auto-approve all pre-checkout queries (must respond within 10 seconds)."""
-    await update.pre_checkout_query.answer(ok=True)
-
-
-async def successful_payment_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Activate premium after successful Telegram Stars payment."""
-    lang = await get_lang(update, context)
-    user_id = update.effective_user.id
-    charge_id = update.message.successful_payment.telegram_payment_charge_id
-    activate_premium(user_id, days=PREMIUM_DAYS, charge_id=charge_id)
-    await update.message.reply_text(t(lang, "premium_activated"), parse_mode="HTML")
-
-
-async def language_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show language selection buttons."""
-    lang = await get_lang(update, context)
-    user_id = update.effective_user.id
-    keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton(t("en", "btn_lang_en"), callback_data=f"lang_set:en:{user_id}"),
-        InlineKeyboardButton(t("ru", "btn_lang_ru"), callback_data=f"lang_set:ru:{user_id}"),
-    ]])
-    await update.message.reply_text(t(lang, "language_choose"), reply_markup=keyboard)
-
-
-async def lang_set_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle language selection button."""
-    query = update.callback_query
-    await query.answer()
-    user_id = update.effective_user.id
-    try:
-        _, new_lang, owner_str = query.data.split(":")
-        owner_id = int(owner_str)
-    except (ValueError, AttributeError):
-        return
-    if owner_id != user_id or new_lang not in SUPPORTED_LANGUAGES:
-        return
-    save_user_language(user_id, new_lang)
-    context.user_data["lang"] = new_lang
-    key = f"language_set_{new_lang}"
-    await query.edit_message_text(t(new_lang, key), parse_mode="HTML")
-
-
 async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send CSV exports of meal and water logs for the last N days."""
     user_id = update.effective_user.id
-    lang = context.user_data.get("lang", "en")
-    if not is_premium(user_id):
-        await update.message.reply_text(t(lang, "premium_export_gate"))
-        return
     days = 30
     if context.args:
         try:
@@ -3127,134 +2408,6 @@ async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
 
 
-async def timezone_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Set or display the user's timezone."""
-    user_id = update.effective_user.id
-
-    if not context.args:
-        tz = get_user_timezone(user_id)
-        if tz is timezone.utc or tz == timezone.utc:
-            current_str = "not set (using UTC)"
-        else:
-            current_str = getattr(tz, "key", str(tz))
-        keyboard = ReplyKeyboardMarkup(
-            [[KeyboardButton("\U0001f4cd Share my location", request_location=True)],
-             [KeyboardButton("Cancel")]],
-            resize_keyboard=True,
-            one_time_keyboard=True,
-        )
-        await update.message.reply_text(
-            f"\U0001f5fa Your timezone: <b>{current_str}</b>\n\n"
-            "Tap <b>Share my location</b> to auto-detect, or set manually:\n"
-            "/timezone Europe/Berlin\n"
-            "/timezone UTC+3  (whole hours only; use IANA name for +5:30 etc.)",
-            parse_mode="HTML",
-            reply_markup=keyboard,
-        )
-        return
-
-    tz_arg = context.args[0].strip()
-    tz_name = None
-
-    # Try as IANA name first
-    try:
-        ZoneInfo(tz_arg)
-        tz_name = tz_arg
-    except (ZoneInfoNotFoundError, KeyError):
-        pass
-
-    # Try UTC+N / UTC-N offset (whole hours only)
-    if tz_name is None:
-        m = re.match(r'^UTC([+-])(\d{1,2})$', tz_arg, re.IGNORECASE)
-        if m:
-            sign, hours = m.group(1), int(m.group(2))
-            # POSIX Etc/GMT sign is inverted: UTC+5 → Etc/GMT-5
-            posix_offset = -hours if sign == "+" else hours
-            candidate = f"Etc/GMT{posix_offset:+d}" if posix_offset != 0 else "Etc/GMT"
-            try:
-                ZoneInfo(candidate)
-                tz_name = candidate
-            except (ZoneInfoNotFoundError, KeyError):
-                pass
-        elif re.match(r'^UTC[+-]\d+:\d+', tz_arg, re.IGNORECASE):
-            await update.message.reply_text(
-                "Half-hour offsets require an IANA timezone name.\n"
-                "Examples: /timezone Asia/Kolkata  or  /timezone Australia/Adelaide"
-            )
-            return
-
-    if tz_name is None:
-        await update.message.reply_text(
-            f"Unknown timezone: {tz_arg}\n\n"
-            "Use an IANA name: /timezone Europe/Berlin\n"
-            "Or a UTC offset (whole hours): /timezone UTC+3"
-        )
-        return
-
-    saved = save_user_timezone(user_id, tz_name)
-    if not saved:
-        await update.message.reply_text(
-            "Please set your profile first with /profile before setting your timezone."
-        )
-        return
-
-    tz = ZoneInfo(tz_name)
-    local_now = datetime.now(timezone.utc).astimezone(tz)
-    offset_str = local_now.strftime("%z")
-    offset_display = f"UTC{offset_str[:3]}:{offset_str[3:]}" if len(offset_str) == 5 else offset_str
-    await update.message.reply_text(
-        f"\u2705 Timezone set to <b>{tz_name}</b> ({offset_display}).\n"
-        "Reminder times will now display in your local time.",
-        parse_mode="HTML",
-    )
-
-
-async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle a shared location message: auto-detect and store timezone."""
-    user_id = update.effective_user.id
-    loc = update.message.location
-    if not loc:
-        return
-
-    tz_name = _tf.timezone_at(lat=loc.latitude, lng=loc.longitude)
-    if not tz_name:
-        await update.message.reply_text(
-            "Could not detect timezone from this location.\n"
-            "Set manually: /timezone Europe/Berlin",
-            reply_markup=ReplyKeyboardRemove(),
-        )
-        return
-
-    try:
-        tz = ZoneInfo(tz_name)
-    except (ZoneInfoNotFoundError, KeyError):
-        await update.message.reply_text(
-            f"Detected timezone '{tz_name}' is not recognized. "
-            "Set manually: /timezone Europe/Berlin",
-            reply_markup=ReplyKeyboardRemove(),
-        )
-        return
-
-    saved = save_user_timezone(user_id, tz_name)
-    if not saved:
-        await update.message.reply_text(
-            "Please set your profile first with /profile, then share your location.",
-            reply_markup=ReplyKeyboardRemove(),
-        )
-        return
-
-    local_now = datetime.now(timezone.utc).astimezone(tz)
-    offset_str = local_now.strftime("%z")
-    offset_display = f"UTC{offset_str[:3]}:{offset_str[3:]}" if len(offset_str) == 5 else offset_str
-    await update.message.reply_text(
-        f"\u2705 Timezone detected: <b>{tz_name}</b> ({offset_display}).\n"
-        "Reminder times will now display in your local time.\n"
-        "Use /reminders to see the updated schedule.",
-        parse_mode="HTML",
-        reply_markup=ReplyKeyboardRemove(),
-    )
-
-
 async def goal_select_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle goal selection button from /goal."""
     query = update.callback_query
@@ -3264,15 +2417,13 @@ async def goal_select_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         _, goal, owner_str = query.data.split(":")
         owner_id = int(owner_str)
     except (ValueError, AttributeError):
-        lang_fb = context.user_data.get("lang", "en")
-        await query.answer(t(lang_fb, "btn_invalid"), show_alert=True)
+        await query.answer("Invalid request.", show_alert=True)
         return
-    lang = context.user_data.get("lang", "en")
     if owner_id != user_id:
-        await query.answer(t(lang, "btn_not_yours"), show_alert=True)
+        await query.answer("This button isn't for you.", show_alert=True)
         return
     if goal not in GOALS:
-        await query.answer(t(lang, "btn_invalid"), show_alert=True)
+        await query.answer("Invalid request.", show_alert=True)
         return
     update_diet_pref(user_id, goal=goal)
     keyboard = InlineKeyboardMarkup([[
@@ -3284,7 +2435,7 @@ async def goal_select_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     ]])
     goal_desc = GOALS.get(goal, goal)
     await query.edit_message_text(
-        t(lang, "goal_updated", goal=goal, desc=goal_desc),
+        f"\u2705 Goal updated: <b>{goal}</b> ({goal_desc})\nSelect a new goal:",
         parse_mode="HTML",
         reply_markup=keyboard,
     )
@@ -3306,17 +2457,13 @@ async def reminders_toggle_callback(update: Update, context: ContextTypes.DEFAUL
         remove_reminder_chat(chat_id)
     is_on = chat_id in get_reminder_chats()
     status = "ON \u2705" if is_on else "OFF"
-    tz = get_user_timezone(update.effective_user.id)
-    schedule = "\n".join(
-        f"  {_format_time_in_tz(h, m, tz)} \u2014 {a}ml" for h, m, a in WATER_SCHEDULE
-    )
     keyboard = InlineKeyboardMarkup([[
         InlineKeyboardButton("Turn On",  callback_data=f"reminders_toggle:on:{chat_id}"),
         InlineKeyboardButton("Turn Off", callback_data=f"reminders_toggle:off:{chat_id}"),
     ]])
     await query.edit_message_text(
         f"\U0001f4a7 Water reminders are currently <b>{status}</b> for this chat.\n\n"
-        f"Schedule:\n{schedule}",
+        f"Schedule:\n{_format_schedule_lines()}",
         parse_mode="HTML",
         reply_markup=keyboard,
     )
@@ -3331,27 +2478,30 @@ async def reset_action_callback(update: Update, context: ContextTypes.DEFAULT_TY
         _, action, owner_str = query.data.split(":")
         owner_id = int(owner_str)
     except (ValueError, AttributeError):
-        lang_fb = context.user_data.get("lang", "en")
-        await query.answer(t(lang_fb, "btn_invalid"), show_alert=True)
+        await query.answer("Invalid request.", show_alert=True)
         return
-    lang = context.user_data.get("lang", "en")
     if owner_id != user_id:
-        await query.answer(t(lang, "btn_not_yours"), show_alert=True)
+        await query.answer("This button isn't for you.", show_alert=True)
         return
     if action == "meals":
         reset_today_meals(user_id)
-        await query.edit_message_text(t(lang, "reset_meals_done"))
+        await query.edit_message_text("\u2705 Today's meal logs cleared.")
     elif action == "water":
         reset_today_water(user_id)
-        await query.edit_message_text(t(lang, "reset_water_done"))
+        await query.edit_message_text("\u2705 Today's water logs cleared.")
     elif action == "all":
         keyboard = InlineKeyboardMarkup([[
-            InlineKeyboardButton(t(lang, "btn_yes_delete"), callback_data=f"confirm_reset_all:{user_id}"),
-            InlineKeyboardButton(t(lang, "btn_cancel"),     callback_data=f"cancel_reset_all:{user_id}"),
+            InlineKeyboardButton("Yes, delete everything", callback_data=f"confirm_reset_all:{user_id}"),
+            InlineKeyboardButton("Cancel",                 callback_data=f"cancel_reset_all:{user_id}"),
         ]])
-        await query.edit_message_text(t(lang, "reset_all_confirm"), reply_markup=keyboard)
+        await query.edit_message_text(
+            "Are you sure? This will permanently delete ALL your data:\n"
+            "meals, water, profile, diet preferences, calorie limits, and weight history.\n\n"
+            "This cannot be undone.",
+            reply_markup=keyboard,
+        )
     else:
-        await query.answer(t(lang, "btn_invalid"), show_alert=True)
+        await query.answer("Invalid request.", show_alert=True)
 
 
 async def history_nav_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3393,9 +2543,9 @@ async def history_nav_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 
     lines = [f"\U0001f4cb Meals for {date_str}:"]
     for m in meals:
-        t = m["created_at"][11:16]
+        ts = m["created_at"][11:16]
         lines.append(
-            f"- [#{m['id']}] [{t}] {_truncate(m['meal_text'])}: ~{m['calories']} kcal"
+            f"- [#{m['id']}] [{ts}] {_truncate(m['meal_text'])}: ~{m['calories']} kcal"
             f" (P:{m['protein_g']}g F:{m['fat_g']}g C:{m['carbs_g']}g)"
         )
     lines.append(f"\nTotal: {total_cal} kcal | P: {total_p}g | F: {total_f}g | C: {total_c}g")
@@ -3418,19 +2568,17 @@ async def water_quick_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         owner_id = int(owner_str)
         chat_id  = int(chat_id_str)
     except (ValueError, AttributeError):
-        lang2 = context.user_data.get("lang", "en")
-        await query.answer(t(lang2, "btn_invalid"), show_alert=True)
+        await query.answer("Invalid request.", show_alert=True)
         return
-    lang = context.user_data.get("lang", "en")
     if owner_id != user_id:
-        await query.answer(t(lang, "btn_not_yours"), show_alert=True)
+        await query.answer("This button isn't for you.", show_alert=True)
         return
     user = update.effective_user
     save_water(user.id, user.username or user.first_name, chat_id, amount)
-    status = _build_water_status_text(user.id, lang)
+    status = _build_water_status_text(user.id)
     await query.edit_message_text(
-        t(lang, "water_quick_logged", amount=amount, status=status),
-        reply_markup=_water_quick_keyboard(user.id, chat_id, lang),
+        f"\u2705 Logged {amount}ml!\n{status}",
+        reply_markup=_water_quick_keyboard(user.id, chat_id),
     )
 
 
@@ -3439,41 +2587,50 @@ async def water_quick_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 # ---------------------------------------------------------------------------
 
 async def handle_meal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle any text message as a meal description."""
+    """Handle any text message as a meal description.
+
+    Flow:
+      1. If a clarification was previously asked, merge the original text with the
+         user's reply and proceed straight to estimation.
+      2. Otherwise call the AI preflight to classify the input as
+         non_food / needs_clarification / ok.
+      3. On ok, call the heavy estimation model and reply with the breakdown.
+    """
     meal_text = update.message.text
     if not meal_text:
         return
 
-    lang = await get_lang(update, context)
-
-    # --- Intent guard: ignore non-food chatter (English-only heuristics) ---
-    if lang == "en" and not _looks_like_food(meal_text):
-        await update.message.reply_text(t(lang, "not_food"))
-        return
-
-    # --- Free tier gate: 5 meal logs/day ---
-    user_id = update.effective_user.id
-    if not is_premium(user_id):
-        count = get_daily_meal_count(user_id)
-        if count >= FREE_DAILY_MEAL_LIMIT:
-            await update.message.reply_text(
-                t(lang, "free_limit_reached", limit=FREE_DAILY_MEAL_LIMIT)
-            )
-            return
-
-    # --- Clarification flow ---
+    # Two-turn merge: previous turn asked a clarifying question
     if "pending_meal" in context.user_data:
-        # User answered our clarification question — combine and process
         original = context.user_data.pop("pending_meal")
         meal_text = f"{original} ({meal_text})"
-    elif lang == "en" and _needs_clarification(meal_text):
-        # Too vague — ask for more detail before calling AI (English only)
-        context.user_data["pending_meal"] = meal_text
-        await update.message.reply_text(
-            _get_clarification_question(meal_text),
-            parse_mode="Markdown",
-        )
-        return
+    else:
+        try:
+            verdict = preflight_meal_input(meal_text)
+        except Exception:
+            logger.exception("Preflight call failed; falling through to estimation")
+            verdict = {"intent": "ok"}
+
+        intent = verdict.get("intent")
+        if intent == "non_food":
+            await update.message.reply_text(
+                "That doesn't look like a food description. Try something like:\n"
+                "  2 scrambled eggs and toast\n"
+                "  150g grilled chicken with rice\n\n"
+                "Type /help to see all commands."
+            )
+            return
+        if intent == "needs_clarification":
+            context.user_data["pending_meal"] = meal_text
+            suggested = verdict.get("suggested")
+            question = verdict.get("question") or "Could you add more detail \u2014 cooking method, quantity, or ingredients?"
+            prefix = f"Did you mean <b>{_html(suggested)}</b>?\n" if suggested else ""
+            await update.message.reply_text(
+                f"\U0001f37d {prefix}{_html(question)}",
+                parse_mode="HTML",
+            )
+            return
+        # intent == "ok" \u2192 fall through to estimation
 
     user = update.effective_user
     try:
@@ -3487,33 +2644,28 @@ async def handle_meal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                   calories, protein, fat, carbs)
         today = get_today_totals(user.id)
         targets = get_targets(user.id)
-        reply, parse_mode = format_reply(data, today, targets, lang)
+        reply, parse_mode = format_reply(data, today, targets)
     except json.JSONDecodeError:
         logger.exception("Failed to parse Groq response")
-        reply = t(lang, "meal_parse_error")
+        reply = "Sorry, I couldn't parse the calorie data. Try rephrasing your meal."
         parse_mode = ""
     except Exception:
         logger.exception("Error estimating calories")
-        reply = t(lang, "meal_error")
+        reply = "Something went wrong. Please try again in a moment."
         parse_mode = ""
 
     water_kb = None
     if parse_mode == "HTML":
         water_kb = InlineKeyboardMarkup([[
-            InlineKeyboardButton(t(lang, "btn_water", ml=250), callback_data=f"water_quick:250:{user.id}:{update.effective_chat.id}"),
-            InlineKeyboardButton(t(lang, "btn_water", ml=500), callback_data=f"water_quick:500:{user.id}:{update.effective_chat.id}"),
+            InlineKeyboardButton("\U0001f4a7 250ml", callback_data=f"water_quick:250:{user.id}:{update.effective_chat.id}"),
+            InlineKeyboardButton("\U0001f4a7 500ml", callback_data=f"water_quick:500:{user.id}:{update.effective_chat.id}"),
         ]])
     await update.message.reply_text(reply, parse_mode=parse_mode or None, reply_markup=water_kb)
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle a photo message as a meal photo."""
-    lang = await get_lang(update, context)
     user = update.effective_user
-
-    if not is_premium(user.id):
-        await update.message.reply_text(t(lang, "premium_photo_gate"))
-        return
 
     photo = update.message.photo[-1]
     caption = update.message.caption or ""
@@ -3531,21 +2683,21 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                   calories, protein, fat, carbs)
         today = get_today_totals(user.id)
         targets = get_targets(user.id)
-        reply, parse_mode = format_reply(data, today, targets, lang)
+        reply, parse_mode = format_reply(data, today, targets)
     except json.JSONDecodeError:
         logger.exception("Failed to parse Groq vision response")
-        reply = t(lang, "photo_parse_error")
+        reply = "Sorry, I couldn't identify the food in this photo. Try adding a caption describing the meal."
         parse_mode = ""
     except Exception:
         logger.exception("Error estimating calories from photo")
-        reply = t(lang, "photo_error")
+        reply = "Something went wrong analyzing the photo. Please try again."
         parse_mode = ""
 
     water_kb = None
     if parse_mode == "HTML":
         water_kb = InlineKeyboardMarkup([[
-            InlineKeyboardButton(t(lang, "btn_water", ml=250), callback_data=f"water_quick:250:{user.id}:{update.effective_chat.id}"),
-            InlineKeyboardButton(t(lang, "btn_water", ml=500), callback_data=f"water_quick:500:{user.id}:{update.effective_chat.id}"),
+            InlineKeyboardButton("\U0001f4a7 250ml", callback_data=f"water_quick:250:{user.id}:{update.effective_chat.id}"),
+            InlineKeyboardButton("\U0001f4a7 500ml", callback_data=f"water_quick:500:{user.id}:{update.effective_chat.id}"),
         ]])
     await update.message.reply_text(reply, parse_mode=parse_mode or None, reply_markup=water_kb)
 
@@ -3610,11 +2762,7 @@ def main() -> None:
             BotCommand("stats", "Streaks and 30-day statistics"),
             BotCommand("weight", "Log weight or view history"),
             BotCommand("export", "Export meals and water as CSV files"),
-            BotCommand("timezone", "Set your timezone for local time display"),
-            BotCommand("language", "Change language / \u042f\u0437\u044b\u043a"),
             BotCommand("try", "Preview calories without saving to log"),
-            BotCommand("premium", "View your subscription status \u2b50"),
-            BotCommand("upgrade", "Upgrade to Premium \u2b50"),
         ]
         await application.bot.set_my_commands(commands, scope=BotCommandScopeDefault())
         await application.bot.set_my_commands(commands, scope=BotCommandScopeAllGroupChats())
@@ -3637,7 +2785,7 @@ def main() -> None:
     app.add_handler(CommandHandler("watertoday", watertoday_command))
     app.add_handler(CommandHandler("reminders", reminders_command))
 
-    # Reset command + inline keyboard callback
+    # Reset command + inline keyboard callbacks
     app.add_handler(CommandHandler("reset", reset_command))
     app.add_handler(CallbackQueryHandler(reset_all_callback, pattern=r"^(confirm|cancel)_reset_all:\d+$"))
     app.add_handler(CallbackQueryHandler(delmeal_inline_callback, pattern=r"^delmeal_inline:\d+:\d+$"))
@@ -3657,25 +2805,13 @@ def main() -> None:
     app.add_handler(CommandHandler("shoplist", shoplist_command))
     app.add_handler(CommandHandler("diet", diet_command))
 
-    # New commands
+    # More commands
     app.add_handler(CommandHandler("delmeal", delmeal_command))
     app.add_handler(CommandHandler("history", history_command))
     app.add_handler(CommandHandler("stats", stats_command))
     app.add_handler(CommandHandler("weight", weight_command))
-    app.add_handler(CommandHandler("language", language_command))
-    app.add_handler(CallbackQueryHandler(lang_set_callback, pattern=r"^lang_set:[a-z]+:\d+$"))
     app.add_handler(CommandHandler("export", export_command))
-    app.add_handler(CommandHandler("timezone", timezone_command))
     app.add_handler(CommandHandler("try", try_command))
-    app.add_handler(CommandHandler("premium", premium_command))
-    app.add_handler(CommandHandler("upgrade", upgrade_command))
-    app.add_handler(CommandHandler("grant", grant_command))
-    app.add_handler(CommandHandler("revoke", revoke_command))
-    app.add_handler(PreCheckoutQueryHandler(pre_checkout_callback))
-    app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_handler))
-
-    # Location handler MUST come before TEXT catch-all
-    app.add_handler(MessageHandler(filters.LOCATION, handle_location))
 
     # Meal & photo handlers (must be last)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_meal))
